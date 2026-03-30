@@ -194,6 +194,12 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
+# dlt
+.dlt/secrets.toml
+_storage/
+*.duckdb
+*.duckdb.wal
+
 # Cursor
 #  Cursor is an AI-powered code editor. `.cursorignore` specifies files/directories to
 #  exclude from AI features like autocomplete and code analysis. Recommended for sensitive data
@@ -205,3 +211,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+#custom
+debug.py
+.DS_Store
