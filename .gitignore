@@ -200,6 +200,9 @@ _storage/
 *.duckdb
 *.duckdb.wal
 
+# Dagster ephemeral home (created by `dagster dev` without DAGSTER_HOME set)
+.tmp_dagster_home_*/
+
 # Cursor
 #  Cursor is an AI-powered code editor. `.cursorignore` specifies files/directories to
 #  exclude from AI features like autocomplete and code analysis. Recommended for sensitive data
@@ -215,3 +218,6 @@ __marimo__/
 #custom
 debug.py
 .DS_Store
+
+# docs
+docs/i14y_rest_api.json
