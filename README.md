@@ -86,6 +86,27 @@ Die Ergebnisse liegen in `dataspot.duckdb`:
 - Dataset `dataspot_raw` — Rohdaten aus Dataspot (eine Tabelle pro dlt-Resource)
 - Dataset `i14y_dcat` — Transformierte Daten im DCAT-Format
 
+## I14Y-Modelle regenerieren
+
+Die Pydantic-Modelle in `src/metadataswiss_connector/dcat/i14y_models.py` werden automatisch aus der I14Y OpenAPI-Spezifikation (`docs/i14y_rest_api.json`) generiert. Bei einer Aktualisierung der Spec:
+
+```bash
+uv run datamodel-codegen \
+  --input docs/i14y_rest_api.json \
+  --input-file-type openapi \
+  --output src/metadataswiss_connector/dcat/i14y_models.py \
+  --output-model-type pydantic_v2.BaseModel \
+  --snake-case-field \
+  --use-field-description \
+  --field-constraints \
+  --target-python-version 3.14 \
+  --use-standard-collections \
+  --use-union-operator \
+  --allow-population-by-field-name
+```
+
+Das File ist generiert — nicht von Hand bearbeiten. Kontrakt-Verstöße in `builders.py` oder `transform_to_dcat` werden nach der Regeneration vom Type-Checker bzw. zur Laufzeit von Pydantic gemeldet.
+
 ## Lizenz
 
 Siehe [LICENSE](LICENSE).

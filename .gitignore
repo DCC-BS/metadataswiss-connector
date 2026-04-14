@@ -218,6 +218,7 @@ __marimo__/
 #custom
 debug.py
 .DS_Store
+data/
 
 # docs
 docs/i14y_rest_api.json

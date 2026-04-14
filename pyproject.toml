@@ -9,10 +9,16 @@ dependencies = [
     "dagster-dlt>=0.27.0",
     "dagster-webserver>=1.12.21",
     "dlt[duckdb]>=1.24.0",
+    "i14y-client",
 ]
 
+[tool.uv.sources]
+i14y-client = { path = "packages/i14y-client", editable = true }
+
 [dependency-groups]
-dev = []
+dev = [
+    "datamodel-code-generator>=0.56.0",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -1,68 +1,73 @@
-"""I14Y DCAT model builders.
+"""I14Y DCAT Input-Model builders.
 
-Shared helper functions that construct I14Y-compatible DCAT structures
-(MultiLanguageModel, VocabularyEntryModel, AgentModel, etc.).
-These are independent of any specific source catalog.
+Helpers that construct typed I14Y ``*InputModel`` instances. Each helper
+takes the loose, source-side primitives (a string, an epoch timestamp,
+a list of tags) and returns a Pydantic model that matches the I14Y
+Partner API contract exactly. Validation happens here, not at POST time.
+
+The model classes themselves are generated from the I14Y OpenAPI spec
+into ``i14y_models.py`` — see that file's header for the regen command.
 """
 
 from datetime import datetime, timezone
 
+from metadataswiss_connector.dcat.i14y_models import (
+    CodeInputModel,
+    KeywordModel,
+    MultiLanguageModel,
+    PeriodOfTimeModel,
+    ResourceModel,
+    VCardModel,
+)
 
-def multi_language(value: str | None, lang: str = "de") -> dict | None:
+
+def multi_language(value: str | None, lang: str = "de") -> MultiLanguageModel | None:
     if not value:
         return None
-    return {lang: value}
+    return MultiLanguageModel(**{lang: value})
 
 
-def publisher(name: str | None, lang: str = "de") -> dict | None:
-    """Build an AgentModel from a publisher name."""
-    if not name:
-        return None
-    return {
-        "identifier": name,
-        "name": {lang: name},
-        "pref_label": {lang: name},
-    }
+def frequency(uri: str | None) -> CodeInputModel | None:
+    """Build a CodeInputModel from an EU frequency URI.
 
-
-def frequency(uri: str | None) -> dict | None:
-    """Build a VocabularyEntryModel from an EU frequency URI."""
+    The I14Y input contract takes only a code; the URI is recovered
+    server-side from the controlled vocabulary.
+    """
     if not uri:
         return None
     code = uri.rsplit("/", 1)[-1] if "/" in uri else uri
-    return {"code": code, "uri": uri}
+    return CodeInputModel(code="OTHER")
 
 
-def keywords(tags: list[str] | None, lang: str = "de") -> list:
-    """Build a list of KeywordModels from tag strings."""
+def keywords(tags: list[str] | None, lang: str = "de") -> list[KeywordModel]:
     if not tags:
         return []
-    return [{"label": {lang: tag}} for tag in tags]
+    return [KeywordModel(label=MultiLanguageModel(**{lang: tag})) for tag in tags]
 
 
-def temporal_coverage(start_epoch_ms: int | float | None) -> list:
-    """Build a PeriodOfTimeModel list from an epoch-ms start timestamp."""
+def temporal_coverage(
+    start_epoch_ms: int | float | None,
+) -> list[PeriodOfTimeModel]:
     if start_epoch_ms is None:
         return []
-    return [{"start": epoch_ms_to_iso(start_epoch_ms)}]
+    return [PeriodOfTimeModel(start=epoch_ms_to_datetime(start_epoch_ms))]
 
 
-def contact_points(email: str | None) -> list:
+def contact_points(email: str | None) -> list[VCardModel]:
     """Build a VCardModel list from an email address."""
     if not email:
         return []
-    return [{"has_email": email}]
+    return [VCardModel(has_email=email)]
 
 
-def landing_pages(uri: str | None) -> list:
-    """Build a ResourceModel list from a URI."""
+def landing_pages(uri: str | None) -> list[ResourceModel]:
     if not uri:
         return []
-    return [{"uri": uri}]
+    return [ResourceModel(uri=uri)]
 
 
-def epoch_ms_to_iso(epoch_ms: int | float | None) -> str | None:
-    """Convert epoch milliseconds to an ISO 8601 datetime string."""
+def epoch_ms_to_datetime(epoch_ms: int | float | None) -> datetime | None:
+    """Convert epoch milliseconds to a timezone-aware datetime."""
     if epoch_ms is None:
         return None
-    return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
