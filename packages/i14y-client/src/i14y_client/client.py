@@ -47,7 +47,11 @@ class I14YClient:
             client_id="...",
             client_secret="...",
         )
-        client = I14YClient(base_url=I14YClient.ABN, auth=auth)
+        client = I14YClient(
+            base_url=I14YClient.ABN,
+            auth=auth,
+            user_agent="MyApp/1.0 (My Org; contact: team@example.org)",
+        )
 
         # Create a dataset
         dataset_id = client.datasets.create(dataset_input)
@@ -58,6 +62,7 @@ class I14YClient:
 
     base_url: str
     auth: I14YAuth
+    user_agent: str
     _http: httpx.Client = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -65,7 +70,10 @@ class I14YClient:
         self._http = httpx.Client(
             base_url=self.base_url,
             auth=self.auth,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": self.user_agent,
+            },
             timeout=30.0,
         )
         self.datasets = DatasetResource(self)

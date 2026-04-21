@@ -19,7 +19,11 @@ auth = I14YAuth(
     client_secret="your-client-secret",
 )
 
-with I14YClient(base_url="https://api-a.i14y.admin.ch/api/partner/v1", auth=auth) as client:
+with I14YClient(
+    base_url="https://api-a.i14y.admin.ch/api/partner/v1",
+    auth=auth,
+    user_agent="MyApp/1.0 (My Organisation; contact: team@example.org)",
+) as client:
     # List datasets
     datasets = client.datasets.list()
 

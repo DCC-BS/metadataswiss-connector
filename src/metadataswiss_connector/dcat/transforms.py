@@ -21,20 +21,23 @@ logger = logging.getLogger(__name__)
 
 def run_transform(
     pipeline_raw: dlt.Pipeline,
-    resource_names: list[str],
-    transform_fn: Callable[..., BaseModel],
+    transform_fns: dict[str, Callable[..., BaseModel]],
     destination,
     *,
     publisher: str,
 ) -> None:
-    """Transform raw resources to I14Y DCAT and load into DuckDB."""
+    """Transform raw resources to I14Y DCAT and load into DuckDB.
+
+    ``transform_fns`` maps each raw resource/table name to its transform
+    function, allowing one source to carry multiple resource types.
+    """
     pipeline_dcat = dlt.pipeline(
         pipeline_name=f"{pipeline_raw.pipeline_name}_dcat",
         destination=destination,
         dataset_name="i14y_dcat",
     )
 
-    for resource_name in resource_names:
+    for resource_name, transform_fn in transform_fns.items():
         load_info = pipeline_dcat.run(
             _read_and_transform(
                 pipeline_raw, resource_name, transform_fn, publisher=publisher
@@ -59,15 +62,27 @@ def _read_and_transform(
     JSON POST body) match the I14Y camelCase contract exactly.
     """
     with pipeline.sql_client() as client:
-        tags_by_parent = _load_child_values(client, f"{table_name}__tags")
+        children_by_parent = _load_scalar_children(
+            client, pipeline.dataset_name, table_name
+        )
+        siblings_by_parent = _load_sibling_children(
+            client, pipeline.dataset_name, table_name, parent_key="id"
+        )
 
         with client.execute_query(f'SELECT * FROM "{table_name}"') as cursor:
             columns = [col[0] for col in cursor.description]
             for row in cursor.fetchall():
                 record = dict(zip(columns, row))
-                tags = tags_by_parent.get(record["_dlt_id"], [])
+                children = {
+                    field: values_by_parent.get(record["_dlt_id"], [])
+                    for field, values_by_parent in children_by_parent.items()
+                }
+                for sibling_table, rows_by_parent_id in siblings_by_parent.items():
+                    children[sibling_table] = rows_by_parent_id.get(
+                        record.get("id"), []
+                    )
                 try:
-                    model = transform_fn(record, tags, publisher=publisher)
+                    model = transform_fn(record, children, publisher=publisher)
                 except ValidationError as exc:
                     logger.warning(
                         "Skipping invalid %s record id=%r: %s",
@@ -183,15 +198,83 @@ def _unflatten(flat: dict) -> dict:
     return nested
 
 
-def _load_child_values(client, table_name: str) -> dict[str, list[str]]:
-    """Load values from a dlt child table, grouped by parent _dlt_id."""
-    values_by_parent: dict[str, list[str]] = defaultdict(list)
-    try:
-        with client.execute_query(
-            f'SELECT _dlt_parent_id, value FROM "{table_name}"'
-        ) as cursor:
-            for parent_id, value in cursor.fetchall():
-                values_by_parent[parent_id].append(value)
-    except DatabaseUndefinedRelation:
-        pass  # Child table may not exist if no records had this field
-    return values_by_parent
+def _load_scalar_children(
+    client, dataset_name: str, parent_table: str
+) -> dict[str, dict[str, list[str]]]:
+    """Discover dlt scalar-list child tables and load them grouped by parent.
+
+    Returns ``{child_field: {parent_dlt_id: [values]}}``. Only child
+    tables with a single ``value`` column (dlt's shape for ``list[str]``
+    fields) are included — struct children are skipped here.
+    """
+    prefix = f"{parent_table}__"
+    with client.execute_query(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = %s AND table_name LIKE %s",
+        dataset_name,
+        f"{prefix}%",
+    ) as cursor:
+        child_tables = [row[0] for row in cursor.fetchall()]
+
+    result: dict[str, dict[str, list[str]]] = {}
+    for table in child_tables:
+        field_name = table[len(prefix):]
+        values_by_parent: dict[str, list[str]] = defaultdict(list)
+        try:
+            with client.execute_query(
+                f'SELECT _dlt_parent_id, value FROM "{table}"'
+            ) as cursor:
+                for parent_id, value in cursor.fetchall():
+                    values_by_parent[parent_id].append(value)
+        except DatabaseUndefinedRelation:
+            continue
+        except Exception:
+            # Struct child table — no bare ``value`` column. Skipped here.
+            continue
+        result[field_name] = values_by_parent
+    return result
+
+
+def _load_sibling_children(
+    client, dataset_name: str, parent_table: str, *, parent_key: str
+) -> dict[str, dict[str, list[dict]]]:
+    """Load sibling tables that reference the parent via an injected column.
+
+    dlt's ``rest_api_source`` stores child resources (wired via ``resolve`` +
+    ``include_from_parent``) as their own top-level tables, adding a column
+    ``_<parent_table>_<parent_key>`` to each row. We group those rows by the
+    parent field value so ``_read_and_transform`` can attach them under the
+    sibling table's name in the ``children`` dict.
+    """
+    ref_col = f"_{parent_table}_{parent_key}"
+    with client.execute_query(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = %s AND table_name NOT LIKE %s",
+        dataset_name,
+        "_dlt_%",
+    ) as cursor:
+        tables = [row[0] for row in cursor.fetchall()]
+
+    result: dict[str, dict[str, list[dict]]] = {}
+    for table in tables:
+        if table == parent_table or table.startswith(f"{parent_table}__"):
+            continue
+        rows_by_parent: dict[str, list[dict]] = defaultdict(list)
+        try:
+            with client.execute_query(f'SELECT * FROM "{table}"') as cursor:
+                columns = [col[0] for col in cursor.description]
+                if ref_col not in columns:
+                    continue
+                for row in cursor.fetchall():
+                    rec = dict(zip(columns, row))
+                    parent_id = rec.pop(ref_col, None)
+                    if parent_id is None:
+                        continue
+                    for dlt_key in ("_dlt_id", "_dlt_load_id"):
+                        rec.pop(dlt_key, None)
+                    rows_by_parent[parent_id].append(rec)
+        except DatabaseUndefinedRelation:
+            continue
+        if rows_by_parent:
+            result[table] = rows_by_parent
+    return result

@@ -4,13 +4,15 @@ from metadataswiss_connector.dcat import builders as dcat
 from metadataswiss_connector.dcat.i14y_models import (
     CodeInputModel,
     DcatDatasetInputModel,
+    DcatDistributionInputModel,
     IdentifierInputModel,
+    ResourceModel,
 )
 
 
 def transform_to_dcat(
     record: dict,
-    tags: list[str] | None = None,
+    children: dict[str, list],
     *,
     publisher: str,
 ) -> DcatDatasetInputModel:
@@ -19,10 +21,16 @@ def transform_to_dcat(
     Args:
         record: Flattened row from DuckDB. Nested fields use dlt's ``__``
                 separator (e.g. ``custom_properties__publisher``).
-        tags: Tag strings from the child table ``<resource>__tags``.
+        children: dlt 1:n child tables keyed by field name (e.g. ``tags``).
         publisher: I14Y publisher identifier (e.g. "Basel-Stadt").
-                   Configured globally via I14Y_PUBLISHER env var.
+                   Configured globally via I14Y_PUBLISHER_IDENTIFIER env var.
     """
+    tags = children.get("tags", [])
+    distributions = [
+        _map_distribution(d)
+        for d in children.get("distributions", [])
+        if d.get("access_url")
+    ]
     return DcatDatasetInputModel(
         title=dcat.multi_language(record.get("label")),
         description=dcat.multi_language(record.get("description")),
@@ -42,4 +50,18 @@ def transform_to_dcat(
             record.get("custom_properties__ods_dataportal_link")
         ),
         languages=[CodeInputModel(code="de")],
+        distributions=distributions or None,
+    )
+
+
+def _map_distribution(raw: dict) -> DcatDistributionInputModel:
+    """Map a Dataspot distribution row to a DcatDistributionInputModel."""
+    label = raw.get("label")
+    return DcatDistributionInputModel(
+        title=dcat.multi_language(label),
+        description=dcat.multi_language(raw.get("description") or label),
+        access_url=ResourceModel(uri=raw.get("access_url") or ""),
+        identifier=raw.get("id"),
+        issued=dcat.epoch_ms_to_datetime(raw.get("date_created")),
+        format=dcat.file_format(raw.get("format")),
     )

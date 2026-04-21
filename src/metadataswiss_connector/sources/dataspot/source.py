@@ -53,7 +53,33 @@ def dataspot_source(
                 "name": "data_products",
                 "endpoint": {
                     "path": "schemes/Datenprodukte/datasets",
+                    "paginator": "single_page",
+                    "data_selector": "_embedded.datasets",
                 },
+                "processing_steps": [
+                    {
+                        "filter": lambda x: x["publicState"] == "PUBLIC"
+                    },
+                ],
+            },
+            {
+                "name": "distributions",
+                "primary_key": "id",
+                "write_disposition": "merge",
+                "endpoint": {
+                    "path": "datasets/{resources.data_products.id}/distributions",
+                    "paginator": "single_page",
+                    "data_selector": "_embedded.distributions",
+                    "response_actions": [
+                        {"status_code": 404, "action": "ignore"},
+                    ],
+                },
+                "processing_steps": [
+                    {
+                        "filter": lambda x: x["publicState"] == "PUBLIC"
+                    },
+                ],
+                "include_from_parent": ["id"],
             },
         ],
     }

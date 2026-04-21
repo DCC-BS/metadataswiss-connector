@@ -27,6 +27,36 @@ def multi_language(value: str | None, lang: str = "de") -> MultiLanguageModel | 
     return MultiLanguageModel(**{lang: value})
 
 
+_FILE_FORMAT_CODES = {
+    "html": "HTML",
+    "htm": "HTML",
+    "pdf": "PDF",
+    "xls": "XLS",
+    "xlsx": "XLSX",
+    "csv": "CSV",
+    "json": "JSON",
+    "xml": "XML",
+    "zip": "ZIP",
+    "txt": "TXT",
+    "geojson": "GEOJSON",
+    "shp": "SHP",
+}
+
+
+def file_format(value: str | None) -> CodeInputModel | None:
+    """Map a loose file-format string to an I14Y file-type vocabulary code.
+
+    I14Y uses the EU file-type authority codes (uppercase).
+    Returns ``None`` for unknown or missing values so the field is omitted.
+    """
+    if not value:
+        return None
+    code = _FILE_FORMAT_CODES.get(value.strip().lower())
+    if not code:
+        return None
+    return CodeInputModel(code=code)
+
+
 def frequency(uri: str | None) -> CodeInputModel | None:
     """Build a CodeInputModel from an EU frequency URI.
 

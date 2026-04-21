@@ -14,6 +14,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from i14y_client import I14YClient
@@ -77,19 +78,53 @@ class SyncState:
 
     def get_i14y_id(self, source_id: str) -> str | None:
         entry = self._data.get(source_id)
-        return entry["id"] if entry else None
+        if not entry or entry.get("deleted_at"):
+            return None
+        return entry["id"]
+
+    def get_source_modified_at(self, source_id: str) -> str | None:
+        entry = self._data.get(source_id)
+        if not entry or entry.get("deleted_at"):
+            return None
+        return entry.get("source_modified_at")
 
     def contains(self, source_id: str) -> bool:
-        return source_id in self._data
+        entry = self._data.get(source_id)
+        return entry is not None and not entry.get("deleted_at")
 
-    def add(self, source_id: str, i14y_id: str) -> None:
-        self._data[source_id] = {"id": i14y_id}
+    def add(
+        self,
+        source_id: str,
+        i14y_id: str,
+        source_modified_at: str | None = None,
+    ) -> None:
+        existing = self._data.get(source_id) or {}
+        # Re-creation after a soft-delete: the I14Y UUID is new, so
+        # created_at must reflect the current incarnation, not the
+        # previous one.
+        is_recreation = bool(existing.get("deleted_at"))
+        now = datetime.now(timezone.utc).isoformat()
+        if is_recreation or not existing.get("created_at"):
+            created_at = now
+        else:
+            created_at = existing["created_at"]
+        entry: dict = {
+            "id": i14y_id,
+            "created_at": created_at,
+            "updated_at": now,
+        }
+        if source_modified_at is not None:
+            entry["source_modified_at"] = source_modified_at
+        self._data[source_id] = entry
 
     def remove(self, source_id: str) -> None:
-        self._data.pop(source_id, None)
+        entry = self._data.get(source_id)
+        if not entry:
+            return
+        entry["deleted_at"] = datetime.now(timezone.utc).isoformat()
 
     def all_source_ids(self) -> set[str]:
-        return set(self._data.keys())
+        return {sid for sid, entry in self._data.items() if not entry.get("deleted_at")}
 
 
 def sync_datasets(
@@ -98,6 +133,7 @@ def sync_datasets(
     *,
     state_path: Path = DEFAULT_STATE_PATH,
     dry_run: bool = False,
+    force: bool = False,
 ) -> SyncResult:
     """Synchronise source records to I14Y.
 
@@ -110,6 +146,7 @@ def sync_datasets(
         source_records: Transformed DCAT records from the local store.
         state_path: Path to the JSON state file.
         dry_run: If True, compute the diff but don't call the API.
+        force: If True, update existing records regardless of modified date.
 
     Returns:
         SyncResult with lists of identifiers per action.
@@ -142,7 +179,13 @@ def sync_datasets(
 
     if dry_run:
         result.created = sorted(to_create)
-        result.updated = sorted(to_check)
+        for source_id in sorted(to_check):
+            source_modified = _normalize_modified(source_by_id[source_id].get("modified"))
+            state_modified = state.get_source_modified_at(source_id)
+            if not force and _is_unchanged(source_modified, state_modified):
+                result.unchanged.append(source_id)
+            else:
+                result.updated.append(source_id)
         result.deleted = sorted(to_delete)
         return result
 
@@ -150,10 +193,19 @@ def sync_datasets(
     for source_id in sorted(to_create):
         _sync_create(client, source_id, source_by_id[source_id], state, result)
 
-    # 4. Update existing datasets (always update to stay in sync)
+    # 4. Update existing datasets only if source modified date is newer
     for source_id in sorted(to_check):
         i14y_id = state.get_i14y_id(source_id)
-        _sync_update(client, source_id, i14y_id, source_by_id[source_id], result)
+        record = source_by_id[source_id]
+        source_modified = _normalize_modified(record.get("modified"))
+        state_modified = state.get_source_modified_at(source_id)
+
+        if not force and _is_unchanged(source_modified, state_modified):
+            logger.debug("Unchanged %s (modified=%s)", source_id, source_modified)
+            result.unchanged.append(source_id)
+            continue
+
+        _sync_update(client, source_id, i14y_id, record, state, source_modified, result)
 
     # 5. Delete datasets no longer in source
     for source_id in sorted(to_delete):
@@ -163,6 +215,60 @@ def sync_datasets(
     # 6. Persist state
     state.save()
 
+    return result
+
+
+def _normalize_modified(value: object) -> str | None:
+    """Coerce a modified value (datetime or string) to an ISO-8601 string."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _is_unchanged(source_modified: str | None, state_modified: str | None) -> bool:
+    """Return True iff the source provides no newer modified timestamp.
+
+    If the source lacks a modified date but the state already has one
+    (set to the create-time fallback), there is no change signal and we
+    treat the record as unchanged. If the state lacks a timestamp, we
+    conservatively treat the record as changed.
+    """
+    if state_modified is None:
+        return False
+    if source_modified is None:
+        return True
+    return source_modified <= state_modified
+
+
+def purge_all(
+    client: I14YClient,
+    *,
+    state_path: Path = DEFAULT_STATE_PATH,
+    dry_run: bool = False,
+) -> SyncResult:
+    """Delete every active dataset recorded in the state file from I14Y.
+
+    Active = not yet marked ``deleted_at``. Soft-deleted entries are
+    skipped (they are already considered gone on I14Y per our records).
+    On success, entries are soft-deleted in the state file.
+    """
+    result = SyncResult()
+    state = SyncState(state_path)
+    source_ids = sorted(state.all_source_ids())
+
+    logger.warning("PURGE: %d active datasets will be deleted from I14Y", len(source_ids))
+
+    if dry_run:
+        result.deleted = source_ids
+        return result
+
+    for source_id in source_ids:
+        i14y_id = state.get_i14y_id(source_id)
+        _sync_delete(client, source_id, i14y_id, state, result)
+
+    state.save()
     return result
 
 
@@ -188,7 +294,14 @@ def _sync_create(
                 "Created %s but failed to set status: %s", source_id, exc
             )
 
-        state.add(source_id, str(i14y_id))
+        modified = _normalize_modified(record.get("modified"))
+        if modified is None:
+            modified = datetime.now(timezone.utc).isoformat()
+            logger.debug(
+                "No modified date from source for %s, using current time %s",
+                source_id, modified,
+            )
+        state.add(source_id, str(i14y_id), modified)
         result.created.append(source_id)
     except Exception as exc:
         logger.error("Failed to create %s: %s", source_id, exc)
@@ -200,12 +313,15 @@ def _sync_update(
     source_id: str,
     i14y_id: str,
     record: dict,
+    state: SyncState,
+    source_modified: str | None,
     result: SyncResult,
 ) -> None:
     try:
         model = DcatDatasetInputModel.model_validate(record)
         client.datasets.update(i14y_id, model)
         logger.info("Updated %s (%s)", source_id, i14y_id)
+        state.add(source_id, i14y_id, source_modified)
         result.updated.append(source_id)
     except Exception as exc:
         logger.error("Failed to update %s: %s", source_id, exc)
