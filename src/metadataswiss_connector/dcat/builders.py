@@ -7,9 +7,17 @@ Partner API contract exactly. Validation happens here, not at POST time.
 
 The model classes themselves are generated from the I14Y OpenAPI spec
 into ``i14y_models.py`` — see that file's header for the regen command.
+
+This module is source-agnostic: it knows the I14Y data model and the
+EU-level controlled vocabularies, nothing about any specific catalog
+source. Source-specific vocabulary mappings live next to the source
+(e.g. ``sources/dataspot/mappings.py``).
 """
 
+import re
 from datetime import datetime, timezone
+from html import unescape
+from html.parser import HTMLParser
 
 from metadataswiss_connector.dcat.i14y_models import (
     CodeInputModel,
@@ -19,6 +27,54 @@ from metadataswiss_connector.dcat.i14y_models import (
     ResourceModel,
     VCardModel,
 )
+
+
+# Tags after which a whitespace separator is inserted so adjacent
+# block-level chunks (e.g. ``<p>A</p><p>B</p>``) don't run together
+# once tags are stripped.
+_HTML_BREAK_TAGS = {
+    "br", "p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+    "blockquote", "pre", "section", "article", "header", "footer",
+}
+
+
+class _HTMLStripper(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag in _HTML_BREAK_TAGS:
+            self._parts.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _HTML_BREAK_TAGS:
+            self._parts.append(" ")
+
+    def handle_data(self, data: str) -> None:
+        self._parts.append(data)
+
+    def get_text(self) -> str:
+        return "".join(self._parts)
+
+
+def html_to_plain_text(value: str | None) -> str | None:
+    """Strip HTML markup so the value can be sent as plain text.
+
+    Source descriptions may contain inline HTML (``<p>…</p>``, ``<br>``,
+    entity references). I14Y stores descriptions as unformatted plain
+    text, so all tags are removed and whitespace is collapsed.
+    """
+    if not value:
+        return value
+    if "<" not in value and "&" not in value:
+        return value
+    parser = _HTMLStripper()
+    parser.feed(value)
+    parser.close()
+    text = unescape(parser.get_text())
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or None
 
 
 def multi_language(value: str | None, lang: str = "de") -> MultiLanguageModel | None:
@@ -57,16 +113,27 @@ def file_format(value: str | None) -> CodeInputModel | None:
     return CodeInputModel(code=code)
 
 
+_FREQUENCY_CODES = {
+    "ANNUAL", "ANNUAL_2", "ANNUAL_3", "BIDECENNIAL", "BIENNIAL", "BIHOURLY",
+    "BIMONTHLY", "BIWEEKLY", "CONT", "DAILY", "DAILY_2", "DECENNIAL", "HOURLY",
+    "IRREG", "MONTHLY", "MONTHLY_2", "MONTHLY_3", "NEVER", "OTHER", "QUARTERLY",
+    "QUADRENNIAL", "QUINQUENNIAL", "TRIDECENNIAL", "TRIENNIAL", "TRIHOURLY",
+    "UNKNOWN", "UPDATE_CONT", "WEEKLY", "WEEKLY_2", "WEEKLY_3",
+}
+
+
 def frequency(uri: str | None) -> CodeInputModel | None:
     """Build a CodeInputModel from an EU frequency URI.
 
-    The I14Y input contract takes only a code; the URI is recovered
-    server-side from the controlled vocabulary.
+    Maps to the I14Y-supported VOCAB_EU_FREQUENCY codes; falls back to
+    ``OTHER`` when the value is outside the controlled vocabulary.
     """
     if not uri:
         return None
-    code = uri.rsplit("/", 1)[-1] if "/" in uri else uri
-    return CodeInputModel(code="OTHER")
+    code = uri.rsplit("/", 1)[-1].upper() if "/" in uri else uri.upper()
+    if code not in _FREQUENCY_CODES:
+        code = "OTHER"
+    return CodeInputModel(code=code)
 
 
 def keywords(tags: list[str] | None, lang: str = "de") -> list[KeywordModel]:
@@ -77,10 +144,11 @@ def keywords(tags: list[str] | None, lang: str = "de") -> list[KeywordModel]:
 
 def temporal_coverage(
     start_epoch_ms: int | float | None,
+    end_epoch_ms: int | float | None,
 ) -> list[PeriodOfTimeModel]:
     if start_epoch_ms is None:
         return []
-    return [PeriodOfTimeModel(start=epoch_ms_to_datetime(start_epoch_ms))]
+    return [PeriodOfTimeModel(start=epoch_ms_to_datetime(start_epoch_ms), end=epoch_ms_to_datetime(end_epoch_ms))]
 
 
 def contact_points(email: str | None) -> list[VCardModel]:

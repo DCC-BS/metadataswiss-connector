@@ -88,6 +88,12 @@ class SyncState:
             return None
         return entry.get("source_modified_at")
 
+    def get_transform_version(self, source_id: str) -> int | None:
+        entry = self._data.get(source_id)
+        if not entry or entry.get("deleted_at"):
+            return None
+        return entry.get("transform_version")
+
     def contains(self, source_id: str) -> bool:
         entry = self._data.get(source_id)
         return entry is not None and not entry.get("deleted_at")
@@ -97,6 +103,7 @@ class SyncState:
         source_id: str,
         i14y_id: str,
         source_modified_at: str | None = None,
+        transform_version: int | None = None,
     ) -> None:
         existing = self._data.get(source_id) or {}
         # Re-creation after a soft-delete: the I14Y UUID is new, so
@@ -115,6 +122,8 @@ class SyncState:
         }
         if source_modified_at is not None:
             entry["source_modified_at"] = source_modified_at
+        if transform_version is not None:
+            entry["transform_version"] = transform_version
         self._data[source_id] = entry
 
     def remove(self, source_id: str) -> None:
@@ -134,6 +143,7 @@ def sync_datasets(
     state_path: Path = DEFAULT_STATE_PATH,
     dry_run: bool = False,
     force: bool = False,
+    transform_version: int | None = None,
 ) -> SyncResult:
     """Synchronise source records to I14Y.
 
@@ -182,7 +192,12 @@ def sync_datasets(
         for source_id in sorted(to_check):
             source_modified = _normalize_modified(source_by_id[source_id].get("modified"))
             state_modified = state.get_source_modified_at(source_id)
-            if not force and _is_unchanged(source_modified, state_modified):
+            state_version = state.get_transform_version(source_id)
+            if (
+                not force
+                and _is_unchanged(source_modified, state_modified)
+                and _version_matches(transform_version, state_version)
+            ):
                 result.unchanged.append(source_id)
             else:
                 result.updated.append(source_id)
@@ -191,21 +206,39 @@ def sync_datasets(
 
     # 3. Create new datasets
     for source_id in sorted(to_create):
-        _sync_create(client, source_id, source_by_id[source_id], state, result)
+        _sync_create(
+            client, source_id, source_by_id[source_id], state, result,
+            transform_version=transform_version,
+        )
 
-    # 4. Update existing datasets only if source modified date is newer
+    # 4. Update existing datasets if the source modified date is newer
+    #    or the persisted transform_version differs from the current one.
     for source_id in sorted(to_check):
         i14y_id = state.get_i14y_id(source_id)
         record = source_by_id[source_id]
         source_modified = _normalize_modified(record.get("modified"))
         state_modified = state.get_source_modified_at(source_id)
+        state_version = state.get_transform_version(source_id)
 
-        if not force and _is_unchanged(source_modified, state_modified):
+        if (
+            not force
+            and _is_unchanged(source_modified, state_modified)
+            and _version_matches(transform_version, state_version)
+        ):
             logger.debug("Unchanged %s (modified=%s)", source_id, source_modified)
             result.unchanged.append(source_id)
             continue
 
-        _sync_update(client, source_id, i14y_id, record, state, source_modified, result)
+        if not _version_matches(transform_version, state_version):
+            logger.info(
+                "Re-publishing %s: transform_version %s → %s",
+                source_id, state_version, transform_version,
+            )
+
+        _sync_update(
+            client, source_id, i14y_id, record, state, source_modified, result,
+            transform_version=transform_version,
+        )
 
     # 5. Delete datasets no longer in source
     for source_id in sorted(to_delete):
@@ -225,6 +258,18 @@ def _normalize_modified(value: object) -> str | None:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)
+
+
+def _version_matches(current: int | None, persisted: int | None) -> bool:
+    """Return True iff the persisted transform version is acceptable.
+
+    If the caller doesn't supply a current version, versioning is opt-in
+    and we don't force re-publishes. If the state has no recorded
+    version (older entries), we conservatively treat it as a mismatch.
+    """
+    if current is None:
+        return True
+    return persisted == current
 
 
 def _is_unchanged(source_modified: str | None, state_modified: str | None) -> bool:
@@ -278,6 +323,8 @@ def _sync_create(
     record: dict,
     state: SyncState,
     result: SyncResult,
+    *,
+    transform_version: int | None = None,
 ) -> None:
     try:
         model = DcatDatasetInputModel.model_validate(record)
@@ -301,7 +348,8 @@ def _sync_create(
                 "No modified date from source for %s, using current time %s",
                 source_id, modified,
             )
-        state.add(source_id, str(i14y_id), modified)
+        state.add(source_id, str(i14y_id), modified, transform_version=transform_version)
+        state.save()
         result.created.append(source_id)
     except Exception as exc:
         logger.error("Failed to create %s: %s", source_id, exc)
@@ -316,12 +364,14 @@ def _sync_update(
     state: SyncState,
     source_modified: str | None,
     result: SyncResult,
+    *,
+    transform_version: int | None = None,
 ) -> None:
     try:
         model = DcatDatasetInputModel.model_validate(record)
         client.datasets.update(i14y_id, model)
         logger.info("Updated %s (%s)", source_id, i14y_id)
-        state.add(source_id, i14y_id, source_modified)
+        state.add(source_id, i14y_id, source_modified, transform_version=transform_version)
         result.updated.append(source_id)
     except Exception as exc:
         logger.error("Failed to update %s: %s", source_id, exc)

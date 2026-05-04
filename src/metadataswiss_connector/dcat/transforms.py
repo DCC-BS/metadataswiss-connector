@@ -65,7 +65,7 @@ def _read_and_transform(
         children_by_parent = _load_scalar_children(
             client, pipeline.dataset_name, table_name
         )
-        siblings_by_parent = _load_sibling_children(
+        siblings_by_parent, lookups = _load_sibling_children(
             client, pipeline.dataset_name, table_name, parent_key="id"
         )
 
@@ -82,7 +82,9 @@ def _read_and_transform(
                         record.get("id"), []
                     )
                 try:
-                    model = transform_fn(record, children, publisher=publisher)
+                    model = transform_fn(
+                        record, children, lookups=lookups, publisher=publisher
+                    )
                 except ValidationError as exc:
                     logger.warning(
                         "Skipping invalid %s record id=%r: %s",
@@ -237,14 +239,18 @@ def _load_scalar_children(
 
 def _load_sibling_children(
     client, dataset_name: str, parent_table: str, *, parent_key: str
-) -> dict[str, dict[str, list[dict]]]:
-    """Load sibling tables that reference the parent via an injected column.
+) -> tuple[dict[str, dict[str, list[dict]]], dict[str, list[dict]]]:
+    """Load top-level sibling tables alongside the parent.
 
-    dlt's ``rest_api_source`` stores child resources (wired via ``resolve`` +
-    ``include_from_parent``) as their own top-level tables, adding a column
-    ``_<parent_table>_<parent_key>`` to each row. We group those rows by the
-    parent field value so ``_read_and_transform`` can attach them under the
-    sibling table's name in the ``children`` dict.
+    Returns ``(siblings_by_parent, lookups)``:
+
+    - ``siblings_by_parent``: tables wired via dlt ``resolve`` +
+      ``include_from_parent``; rows carry a ``_<parent>_<key>`` column and
+      are grouped by parent id so ``_read_and_transform`` can attach them
+      under the sibling table's name in the ``children`` dict.
+    - ``lookups``: tables in the same dataset with no parent ref column,
+      loaded in full and keyed by table name. Used by transforms for
+      cross-reference data (e.g. attribution → role/post/person).
     """
     ref_col = f"_{parent_table}_{parent_key}"
     with client.execute_query(
@@ -256,25 +262,35 @@ def _load_sibling_children(
         tables = [row[0] for row in cursor.fetchall()]
 
     result: dict[str, dict[str, list[dict]]] = {}
+    lookups: dict[str, list[dict]] = {}
     for table in tables:
         if table == parent_table or table.startswith(f"{parent_table}__"):
             continue
-        rows_by_parent: dict[str, list[dict]] = defaultdict(list)
         try:
             with client.execute_query(f'SELECT * FROM "{table}"') as cursor:
                 columns = [col[0] for col in cursor.description]
-                if ref_col not in columns:
-                    continue
-                for row in cursor.fetchall():
-                    rec = dict(zip(columns, row))
-                    parent_id = rec.pop(ref_col, None)
-                    if parent_id is None:
-                        continue
-                    for dlt_key in ("_dlt_id", "_dlt_load_id"):
-                        rec.pop(dlt_key, None)
-                    rows_by_parent[parent_id].append(rec)
+                rows = cursor.fetchall()
         except DatabaseUndefinedRelation:
             continue
-        if rows_by_parent:
-            result[table] = rows_by_parent
-    return result
+        if ref_col in columns:
+            rows_by_parent: dict[str, list[dict]] = defaultdict(list)
+            for row in rows:
+                rec = dict(zip(columns, row))
+                parent_id = rec.pop(ref_col, None)
+                if parent_id is None:
+                    continue
+                for dlt_key in ("_dlt_id", "_dlt_load_id"):
+                    rec.pop(dlt_key, None)
+                rows_by_parent[parent_id].append(rec)
+            if rows_by_parent:
+                result[table] = rows_by_parent
+        elif "__" not in table:
+            recs: list[dict] = []
+            for row in rows:
+                rec = dict(zip(columns, row))
+                for dlt_key in ("_dlt_id", "_dlt_load_id"):
+                    rec.pop(dlt_key, None)
+                recs.append(rec)
+            if recs:
+                lookups[table] = recs
+    return result, lookups

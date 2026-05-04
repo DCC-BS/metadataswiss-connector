@@ -10,7 +10,7 @@ from metadataswiss_connector.config import I14YConfig
 if TYPE_CHECKING:
     from metadataswiss_connector.registry import CatalogSource
 
-DUCKDB_PATH = "dataspot.duckdb"
+DUCKDB_PATH = "metadata.duckdb"
 
 
 def duckdb_destination():

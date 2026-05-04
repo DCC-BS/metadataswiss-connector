@@ -28,6 +28,7 @@ class TransformFn(Protocol):
         record: dict,
         children: dict[str, list],
         *,
+        lookups: dict[str, list[dict]],
         publisher: str,
     ) -> BaseModel: ...
 
@@ -44,12 +45,17 @@ class CatalogSource:
         resources: Maps dlt resource name → transform function.
         publisher: Optional publisher override. If ``None``, the caller's
               global publisher (e.g. from ``I14YConfig``) is used.
+        transform_version: Bumped manually when transform logic changes.
+              Records whose persisted version differs from this are
+              re-published on the next sync, regardless of source
+              modified date.
     """
 
     name: str
     dlt_source_factory: Callable[[], DltSource]
     resources: dict[str, TransformFn]
     publisher: str | None = None
+    transform_version: int = 1
 
 
 def run_source(

@@ -77,16 +77,21 @@ def _step_transform(source: CatalogSource) -> None:
     )
 
 
-def _step_publish(source: CatalogSource) -> None:
+def _step_publish(source: CatalogSource, limit: int | None = DEFAULT_SYNC_LIMIT) -> None:
     records: list[dict] = []
     for resource_name in source.resources:
-        records.extend(read_transformed(resource_name, limit=DEFAULT_SYNC_LIMIT))
+        records.extend(read_transformed(resource_name, limit=limit))
     if not records:
         logger.warning("no transformed records for %s — skipping publish", source.name)
         return
     state_path = Path(f"data/{source.name}_dataset_ids.json")
     with i14y_client_from_env() as client:
-        result = sync_datasets(client, records, state_path=state_path)
+        result = sync_datasets(
+            client,
+            records,
+            state_path=state_path,
+            transform_version=source.transform_version,
+        )
     logger.info("publish complete for %s: %s", source.name, result.summary())
 
 
@@ -97,10 +102,17 @@ _STEP_FNS = {
 }
 
 
-def _run_one(source: CatalogSource, steps: tuple[str, ...]) -> None:
+def _run_one(
+    source: CatalogSource,
+    steps: tuple[str, ...],
+    publish_limit: int | None = DEFAULT_SYNC_LIMIT,
+) -> None:
     logger.info("running source %s steps=%s", source.name, list(steps))
     for step in steps:
-        _STEP_FNS[step](source)
+        if step == "publish":
+            _step_publish(source, limit=publish_limit)
+        else:
+            _STEP_FNS[step](source)
 
 
 def _cmd_purge(args: argparse.Namespace) -> int:
@@ -139,8 +151,9 @@ def _cmd_purge(args: argparse.Namespace) -> int:
 def _cmd_run(args: argparse.Namespace) -> int:
     steps = _parse_steps(args.steps)
     targets = SOURCES if args.all else [_by_name(args.source)]
+    publish_limit = args.limit if args.limit > 0 else None
     for s in targets:
-        _run_one(s, steps)
+        _run_one(s, steps, publish_limit=publish_limit)
     return 0
 
 
@@ -159,6 +172,15 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument(
         "--steps",
         help=f"comma-separated subset of {','.join(ALL_STEPS)} (default: all)",
+    )
+    run.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_SYNC_LIMIT,
+        help=(
+            f"max records per resource to publish to I14Y "
+            f"(default: {DEFAULT_SYNC_LIMIT}, use 0 for no limit)"
+        ),
     )
     run.set_defaults(func=_cmd_run)
 
