@@ -324,6 +324,15 @@ class DatasetResource(_BaseResource[DcatDatasetInputModel, DcatDatasetModel]):
         if structure:
             self.import_structure(dataset_id, structure)
 
+    def decommission_and_delete(self, id_: UUID | str) -> None:
+        """Drop the SHACL structure before deleting the dataset itself.
+
+        I14Y keeps the structure as a sub-resource of the dataset; leaving
+        it behind blocks the DELETE on the parent.
+        """
+        self.delete_structure(id_)
+        super().decommission_and_delete(id_)
+
 
 class ConceptResource(_BaseResource[ConceptInputBase, IopConceptModel]):
     """Operations on concepts.
