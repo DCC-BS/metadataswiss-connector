@@ -35,7 +35,7 @@ STAATSKALENDER_MAX_RETRIES = 3
 # should force a re-publish of every record, even if the source
 # ``modified`` timestamp hasn't moved. Sync compares this against the
 # value persisted in the per-source state file.
-TRANSFORM_VERSION = 15
+TRANSFORM_VERSION = 1
 
 # Sentinel epoch-ms values Dataspot uses for "no bound" on validity:
 # 1900-01-01 and 3000-01-01 UTC. Skip these when mapping to I14Y so we

@@ -92,6 +92,9 @@ def transform_to_dcat(
             record.get("custom_properties__retention_period"),
             record.get("custom_properties__retention_justification"),
         ),
+        landing_pages=dcat.landing_pages(record.get("custom_properties__landing_page")) or None,
+        version=record.get("custom_properties__version"),
+        version_notes=dcat.multi_language(record.get("custom_properties__version_notes")),
         distributions=distributions or None,
     )
     if structure_ttl:
