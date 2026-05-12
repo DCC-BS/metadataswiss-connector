@@ -1,17 +1,28 @@
 """Dataspot-specific field mapping to I14Y DCAT format."""
 
-# Bump when the mapping logic in this module changes in a way that
-# should force a re-publish of every record, even if the source
-# ``modified`` timestamp hasn't moved. Sync compares this against the
-# value persisted in the per-source state file.
-TRANSFORM_VERSION = 1
+from datetime import datetime, timezone
 
 from metadataswiss_connector.dcat import builders as dcat
 from metadataswiss_connector.sources.dataspot import mappings
+from metadataswiss_connector.sources.dataspot.structure import (
+    build_dataset_shacl_turtle,
+)
+from metadataswiss_connector.sources.dataspot.constants import (
+    DATASPOT_VALID_FROM_SENTINEL,
+    DATASPOT_VALID_TO_SENTINEL,
+    DEFAULT_CODE_LIST_VALUE_MAX_LENGTH,
+    DEFAULT_CODE_LIST_VALUE_TYPE,
+    EMAIL_RE,
+    FALLBACK_CONTACT_EMAIL,
+)
 from metadataswiss_connector.dcat.i14y_models import (
     CodeInputModel,
+    CodeListConceptInput,
+    CodeListEntrySortProperty,
+    CodeListEntryValueType,
     DcatDatasetInputModel,
     DcatDistributionInputModel,
+    EmailInputModel,
     IdentifierInputModel,
     ResourceModel,
     VCardModel,
@@ -24,7 +35,7 @@ def transform_to_dcat(
     *,
     lookups: dict[str, list[dict]],
     publisher: str,
-) -> DcatDatasetInputModel:
+) -> tuple[DcatDatasetInputModel, dict] | DcatDatasetInputModel:
     """Map a flattened Dataspot dataset row to a DcatDatasetInputModel.
 
     Args:
@@ -45,7 +56,15 @@ def transform_to_dcat(
     ]
     contact_points = _organizational_unit_contact_points(record["id"], lookups)
     data_owner = _resolve_data_owner(record["id"], lookups)
-    return DcatDatasetInputModel(
+    structure_ttl = build_dataset_shacl_turtle(
+        dataset_id=record["id"],
+        dataset_label=record.get("label"),
+        components=[
+            c for c in lookups.get("dataset_structure_components", [])
+            if c.get("dataset_id") == record["id"]
+        ],
+    )
+    model = DcatDatasetInputModel(
         data_owner=data_owner,
         title=dcat.multi_language(record.get("label")),
         description=dcat.multi_language(dcat.html_to_plain_text(record.get("description"))),
@@ -75,6 +94,9 @@ def transform_to_dcat(
         ),
         distributions=distributions or None,
     )
+    if structure_ttl:
+        return model, {"structure": structure_ttl}
+    return model
 
 
 def _resolve_data_owner(
@@ -158,6 +180,136 @@ def _organizational_unit_contact_points(
             )
         ]
     return []
+
+
+def transform_to_concept(
+    record: dict,
+    children: dict[str, list],
+    *,
+    lookups: dict[str, list[dict]],
+    publisher: str,
+) -> tuple[CodeListConceptInput, dict]:
+    """Map a Dataspot enumeration row to a CodeListConceptInput.
+
+    Returns ``(model, extras)`` where ``extras["entries"]`` carries the
+    code-list entry payloads. The concept itself is created via
+    ``POST /concepts``; the entries are uploaded as a follow-up via
+    ``POST /concepts/{id}/codelist-entries/imports/Json`` once the
+    concept's I14Y UUID is known.
+    """
+    contact = _resolve_concept_contact(record)
+    # Enumerations expose no customProperties — ``date_created`` is the
+    # only timestamp available in the source payload.
+    valid_from = (
+        dcat.epoch_ms_to_datetime(record.get("date_created"))
+        or datetime.now(timezone.utc)
+    )
+    raw_entries = children.get("code_list_entries", [])
+    model = CodeListConceptInput(
+        identifier=record["id"],
+        name=dcat.multi_language(record.get("label")),
+        description=(
+            dcat.multi_language(dcat.html_to_plain_text(record.get("description")))
+            or dcat.multi_language(record.get("label"))
+        ),
+        publisher=IdentifierInputModel(identifier=publisher),
+        responsible_person=EmailInputModel(email=contact),
+        responsible_deputy=EmailInputModel(email=contact),
+        valid_from=valid_from,
+        version="1.0.0",
+        code_list_entry_value_type=_value_type_from_entries(raw_entries),
+        code_list_entry_value_max_length=_max_code_length(raw_entries),
+        code_list_entry_default_sort_property=CodeListEntrySortProperty.code,
+    )
+    extras = {"entries": _build_entries(raw_entries)}
+    return model, extras
+
+
+def _build_entries(raw_entries: list[dict]) -> list[dict]:
+    """Map Dataspot literals to CodeListEntryModel JSON payloads.
+
+    Skips entries without a ``code`` (I14Y rejects empty codes). The
+    ``conceptId`` is left out and injected by the I14Y client at upload
+    time, since it's only known after the parent concept is created.
+    """
+    code_by_id = {e.get("id"): e.get("code") for e in raw_entries if e.get("id")}
+    out: list[dict] = []
+    for entry in raw_entries:
+        code = entry.get("code")
+        if not code:
+            continue
+        name_text = entry.get("long_text") or entry.get("short_text")
+        payload: dict = {
+            "code": str(code),
+            "name": _multi_lang_dict(name_text),
+        }
+        description = dcat.html_to_plain_text(entry.get("description"))
+        if description:
+            payload["description"] = _multi_lang_dict(description)
+        valid_from = _entry_validity(entry.get("valid_from"), DATASPOT_VALID_FROM_SENTINEL)
+        if valid_from:
+            payload["validFrom"] = valid_from
+        valid_to = _entry_validity(entry.get("valid_to"), DATASPOT_VALID_TO_SENTINEL)
+        if valid_to:
+            payload["validTo"] = valid_to
+        parent_id = entry.get("parent_id")
+        if parent_id and parent_id in code_by_id and code_by_id[parent_id]:
+            payload["parentCode"] = str(code_by_id[parent_id])
+        out.append(payload)
+    return out
+
+
+def _multi_lang_dict(text: str) -> dict:
+    """Inline equivalent of dcat.multi_language for raw JSON dicts."""
+    return {"de": text}
+
+
+def _entry_validity(epoch_ms: int | float | None, sentinel: int) -> str | None:
+    """Convert epoch ms to ISO-8601, skipping Dataspot's open-bound sentinels."""
+    if epoch_ms is None or epoch_ms == sentinel:
+        return None
+    dt = dcat.epoch_ms_to_datetime(epoch_ms)
+    return dt.isoformat() if dt else None
+
+
+def _value_type_from_entries(entries: list[dict]) -> CodeListEntryValueType:
+    """Infer code-list value type from the ``code`` of each entry.
+
+    I14Y only allows ``Numeric`` if every code parses as a number;
+    otherwise we fall back to ``String``.
+    """
+    if not entries:
+        return DEFAULT_CODE_LIST_VALUE_TYPE
+    for entry in entries:
+        code = entry.get("code")
+        if code is None:
+            return CodeListEntryValueType.string
+        try:
+            float(str(code))
+        except ValueError:
+            return CodeListEntryValueType.string
+    return CodeListEntryValueType.numeric
+
+
+def _max_code_length(entries: list[dict]) -> int:
+    """Tightest valid max length for the given codes, with a sane floor."""
+    if not entries:
+        return DEFAULT_CODE_LIST_VALUE_MAX_LENGTH
+    longest = max((len(str(e.get("code") or "")) for e in entries), default=0)
+    return max(longest, 1)
+
+
+def _resolve_concept_contact(record: dict) -> str:
+    """Pick an email for responsiblePerson/Deputy on a code-list concept.
+
+    Dataspot's ``created_by`` is typically an email; if it isn't, we
+    fall back to a constant so the concept still validates. The user
+    can refine this once the source surfaces a stable contact field.
+    """
+    candidate = (record.get("created_by") or "").strip()
+    if candidate and EMAIL_RE.match(candidate):
+        return candidate
+    return FALLBACK_CONTACT_EMAIL
 
 
 def _map_distribution(raw: dict) -> DcatDistributionInputModel:

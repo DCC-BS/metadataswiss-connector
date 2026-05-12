@@ -1,28 +1,52 @@
-"""Sync logic: reconcile local DCAT records with I14Y remote state.
+"""Sync logic: reconcile local I14Y input records with remote state.
 
-Follows the same pattern as the official I14Y harvester template:
-- A local state file tracks which source identifiers have been published
-  and their corresponding I14Y UUIDs.
-- New datasets are created, then set to Public / Recorded.
-- Existing datasets are updated (only if modified since last sync).
-- Datasets removed from the source are set to Internal, then deleted.
+Generic core (`sync_records` / `purge_records`) reconciles a list of
+transformed records against a per-resource state file via any I14Y
+resource client that exposes the standard CRUD + lifecycle operations.
+The public `sync` / `purge` entrypoints dispatch on a ``kind`` string
+(``"dataset"`` / ``"concept"``) via the ``_KINDS`` registry.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable, Protocol
+from uuid import UUID
+
+from pydantic import BaseModel
 
 from i14y_client import I14YClient
-from i14y_client.models import DcatDatasetInputModel
+from i14y_client.models import CodeListConceptInput, DcatDatasetInputModel
+from metadataswiss_connector.dcat.transforms import EXTRAS_KEY
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_STATE_PATH = Path("data/dataset_ids.json")
+
+class ResourceClient(Protocol):
+    """Duck-typed contract satisfied by ``client.datasets`` / ``client.concepts``."""
+
+    def create(self, model: BaseModel) -> UUID: ...
+    def update(self, id_: UUID | str, model: BaseModel) -> None: ...
+    def publish_initial(self, id_: UUID | str) -> None: ...
+    def decommission_and_delete(self, id_: UUID | str) -> None: ...
+    def apply_extras(self, id_: UUID | str, extras: dict) -> None: ...
+
+
+SourceIdFn = Callable[[dict], str]
+
+
+def _dataset_source_id(record: dict) -> str:
+    """First entry of ``identifiers`` is the stable cross-system key."""
+    return str(record["identifiers"][0])
+
+
+def _concept_source_id(record: dict) -> str:
+    """``identifier`` (singular) is the stable cross-system key on concepts."""
+    return str(record["identifier"])
 
 
 @dataclass
@@ -53,11 +77,11 @@ class SyncResult:
 class SyncState:
     """Persistent mapping of source identifier → I14Y UUID.
 
-    Stored as a JSON file so the sync knows which datasets it owns on
+    Stored as a JSON file so the sync knows which records it owns on
     I14Y without having to query the remote API.
     """
 
-    def __init__(self, path: Path = DEFAULT_STATE_PATH) -> None:
+    def __init__(self, path: Path) -> None:
         self.path = path
         self._data: dict[str, dict] = {}
         self._load()
@@ -136,51 +160,38 @@ class SyncState:
         return {sid for sid, entry in self._data.items() if not entry.get("deleted_at")}
 
 
-def sync_datasets(
-    client: I14YClient,
+def sync_records(
+    resource: ResourceClient,
     source_records: list[dict],
     *,
-    state_path: Path = DEFAULT_STATE_PATH,
+    model_class: type[BaseModel],
+    source_id_for: SourceIdFn,
+    state_path: Path,
     dry_run: bool = False,
     force: bool = False,
     transform_version: int | None = None,
 ) -> SyncResult:
-    """Synchronise source records to I14Y.
-
-    Each source record must be a dict that validates as
-    ``DcatDatasetInputModel``.  The first entry in ``identifiers`` is
-    used as the stable key to match source ↔ I14Y.
+    """Synchronise transformed records to I14Y via the given resource client.
 
     Args:
-        client: Authenticated I14Y API client.
-        source_records: Transformed DCAT records from the local store.
-        state_path: Path to the JSON state file.
-        dry_run: If True, compute the diff but don't call the API.
-        force: If True, update existing records regardless of modified date.
-
-    Returns:
-        SyncResult with lists of identifiers per action.
+        resource: I14Y resource accessor (``client.datasets``,
+                 ``client.concepts``, …) implementing ``ResourceClient``.
+        source_records: dicts produced by the transform step, each
+                       validating as ``model_class``.
+        model_class: Pydantic input model class for the resource.
+        source_id_for: Pull the stable source identifier out of a record.
+                       Datasets use ``identifiers[0]``, concepts use
+                       ``identifier``.
+        state_path: Per-resource state file (one file per source+resource).
+        dry_run: Compute the diff without calling the API.
+        force: Re-publish existing records regardless of modified date /
+               transform version.
+        transform_version: Current transform version. Records whose
+                          persisted version differs are re-published.
     """
-    result = SyncResult()
     state = SyncState(state_path)
-
-    # 1. Build source index: source_identifier → record dict
-    source_by_id: dict[str, dict] = {}
-    for record in source_records:
-        identifiers = record.get("identifiers", [])
-        if not identifiers:
-            logger.warning("Record without identifiers, skipping: %s", record.get("title"))
-            continue
-        source_id = str(identifiers[0])
-        source_by_id[source_id] = record
-
-    # 2. Compute diff
-    source_ids = set(source_by_id.keys())
-    previous_ids = state.all_source_ids()
-
-    to_create = source_ids - previous_ids
-    to_check = source_ids & previous_ids
-    to_delete = previous_ids - source_ids
+    source_by_id = _build_source_index(source_records, source_id_for)
+    to_create, to_check, to_delete = _compute_diff(set(source_by_id), state.all_source_ids())
 
     logger.info(
         "Sync plan: %d new, %d to check for updates, %d to delete",
@@ -188,67 +199,203 @@ def sync_datasets(
     )
 
     if dry_run:
-        result.created = sorted(to_create)
-        for source_id in sorted(to_check):
-            source_modified = _normalize_modified(source_by_id[source_id].get("modified"))
-            state_modified = state.get_source_modified_at(source_id)
-            state_version = state.get_transform_version(source_id)
-            if (
-                not force
-                and _is_unchanged(source_modified, state_modified)
-                and _version_matches(transform_version, state_version)
-            ):
-                result.unchanged.append(source_id)
-            else:
-                result.updated.append(source_id)
-        result.deleted = sorted(to_delete)
-        return result
-
-    # 3. Create new datasets
-    for source_id in sorted(to_create):
-        _sync_create(
-            client, source_id, source_by_id[source_id], state, result,
-            transform_version=transform_version,
+        return _dry_run_result(
+            to_create, to_check, to_delete, source_by_id, state,
+            force=force, transform_version=transform_version,
         )
 
-    # 4. Update existing datasets if the source modified date is newer
-    #    or the persisted transform_version differs from the current one.
-    for source_id in sorted(to_check):
-        i14y_id = state.get_i14y_id(source_id)
-        record = source_by_id[source_id]
-        source_modified = _normalize_modified(record.get("modified"))
-        state_modified = state.get_source_modified_at(source_id)
-        state_version = state.get_transform_version(source_id)
+    result = SyncResult()
+    # try/finally guarantees state is persisted even on unexpected errors,
+    # so successfully-created I14Y records aren't orphaned by a crash.
+    try:
+        _run_create_phase(
+            resource, model_class, sorted(to_create), source_by_id,
+            state, result, transform_version=transform_version,
+        )
+        _run_update_phase(
+            resource, model_class, sorted(to_check), source_by_id,
+            state, result, force=force, transform_version=transform_version,
+        )
+        _run_delete_phase(resource, sorted(to_delete), state, result)
+    finally:
+        state.save()
 
-        if (
-            not force
-            and _is_unchanged(source_modified, state_modified)
-            and _version_matches(transform_version, state_version)
+    return result
+
+
+def _build_source_index(
+    source_records: list[dict], source_id_for: SourceIdFn,
+) -> dict[str, dict]:
+    source_by_id: dict[str, dict] = {}
+    for record in source_records:
+        try:
+            source_id = source_id_for(record)
+        except (KeyError, IndexError, TypeError):
+            logger.warning("Record without source identifier, skipping: %r", record)
+            continue
+        source_by_id[source_id] = record
+    return source_by_id
+
+
+def _compute_diff(
+    source_ids: set[str], previous_ids: set[str],
+) -> tuple[set[str], set[str], set[str]]:
+    """Return (to_create, to_check, to_delete) sets."""
+    return (
+        source_ids - previous_ids,
+        source_ids & previous_ids,
+        previous_ids - source_ids,
+    )
+
+
+def _needs_update(
+    source_id: str, record: dict, state: SyncState,
+    *, force: bool, transform_version: int | None,
+) -> bool:
+    if force:
+        return True
+    source_modified = _normalize_modified(record.get("modified"))
+    state_modified = state.get_source_modified_at(source_id)
+    state_version = state.get_transform_version(source_id)
+    if _is_unchanged(source_modified, state_modified) and _version_matches(
+        transform_version, state_version
+    ):
+        return False
+    return True
+
+
+def _dry_run_result(
+    to_create: set[str], to_check: set[str], to_delete: set[str],
+    source_by_id: dict[str, dict], state: SyncState,
+    *, force: bool, transform_version: int | None,
+) -> SyncResult:
+    result = SyncResult()
+    result.created = sorted(to_create)
+    for source_id in sorted(to_check):
+        if _needs_update(
+            source_id, source_by_id[source_id], state,
+            force=force, transform_version=transform_version,
         ):
-            logger.debug("Unchanged %s (modified=%s)", source_id, source_modified)
+            result.updated.append(source_id)
+        else:
+            result.unchanged.append(source_id)
+    result.deleted = sorted(to_delete)
+    return result
+
+
+def _run_create_phase(
+    resource: ResourceClient, model_class: type[BaseModel],
+    source_ids: list[str], source_by_id: dict[str, dict],
+    state: SyncState, result: SyncResult,
+    *, transform_version: int | None,
+) -> None:
+    for source_id in source_ids:
+        _sync_create(
+            resource, model_class, source_id, source_by_id[source_id],
+            state, result, transform_version=transform_version,
+        )
+
+
+def _run_update_phase(
+    resource: ResourceClient, model_class: type[BaseModel],
+    source_ids: list[str], source_by_id: dict[str, dict],
+    state: SyncState, result: SyncResult,
+    *, force: bool, transform_version: int | None,
+) -> None:
+    for source_id in source_ids:
+        record = source_by_id[source_id]
+        if not _needs_update(
+            source_id, record, state,
+            force=force, transform_version=transform_version,
+        ):
+            logger.debug(
+                "Unchanged %s (modified=%s)",
+                source_id, _normalize_modified(record.get("modified")),
+            )
             result.unchanged.append(source_id)
             continue
 
+        state_version = state.get_transform_version(source_id)
         if not _version_matches(transform_version, state_version):
             logger.info(
                 "Re-publishing %s: transform_version %s → %s",
                 source_id, state_version, transform_version,
             )
 
+        i14y_id = state.get_i14y_id(source_id)
+        if i14y_id is None:
+            # Should be impossible: _compute_diff put this id in
+            # ``to_check`` because state knew about it. Treat as a soft
+            # failure rather than crashing the whole sync.
+            logger.error(
+                "State inconsistency: %s in update set but no i14y_id", source_id
+            )
+            result.failed.append((source_id, "missing i14y_id in state"))
+            continue
+
         _sync_update(
-            client, source_id, i14y_id, record, state, source_modified, result,
+            resource, model_class, source_id,
+            i14y_id, record, state,
+            _normalize_modified(record.get("modified")), result,
             transform_version=transform_version,
         )
 
-    # 5. Delete datasets no longer in source
-    for source_id in sorted(to_delete):
-        i14y_id = state.get_i14y_id(source_id)
-        _sync_delete(client, source_id, i14y_id, state, result)
 
-    # 6. Persist state
-    state.save()
+def _run_delete_phase(
+    resource: ResourceClient, source_ids: list[str],
+    state: SyncState, result: SyncResult,
+) -> None:
+    for source_id in source_ids:
+        _sync_delete(resource, source_id, state.get_i14y_id(source_id), state, result)
 
-    return result
+
+@dataclass(frozen=True)
+class _KindSpec:
+    """Binding from a resource ``kind`` string to its concrete plumbing."""
+
+    resource_attr: str
+    model_class: type[BaseModel]
+    source_id_for: SourceIdFn
+
+
+_KINDS: dict[str, _KindSpec] = {
+    "dataset": _KindSpec("datasets", DcatDatasetInputModel, _dataset_source_id),
+    "concept": _KindSpec("concepts", CodeListConceptInput, _concept_source_id),
+}
+
+
+def _resource_for(client: I14YClient, kind: str) -> tuple[ResourceClient, _KindSpec]:
+    try:
+        spec = _KINDS[kind]
+    except KeyError:
+        raise ValueError(
+            f"unknown sync kind {kind!r} (known: {sorted(_KINDS)})"
+        ) from None
+    return getattr(client, spec.resource_attr), spec
+
+
+def sync(
+    client: I14YClient,
+    source_records: list[dict],
+    *,
+    kind: str,
+    state_path: Path,
+    dry_run: bool = False,
+    force: bool = False,
+    transform_version: int | None = None,
+) -> SyncResult:
+    """Sync transformed records to I14Y for the given resource ``kind``."""
+    resource, spec = _resource_for(client, kind)
+    return sync_records(
+        resource,
+        source_records,
+        model_class=spec.model_class,
+        source_id_for=spec.source_id_for,
+        state_path=state_path,
+        dry_run=dry_run,
+        force=force,
+        transform_version=transform_version,
+    )
 
 
 def _normalize_modified(value: object) -> str | None:
@@ -287,38 +434,65 @@ def _is_unchanged(source_modified: str | None, state_modified: str | None) -> bo
     return source_modified <= state_modified
 
 
-def purge_all(
-    client: I14YClient,
+def purge_records(
+    resource: ResourceClient,
     *,
-    state_path: Path = DEFAULT_STATE_PATH,
+    state_path: Path,
     dry_run: bool = False,
 ) -> SyncResult:
-    """Delete every active dataset recorded in the state file from I14Y.
+    """Delete every active record recorded in the state file from I14Y.
 
     Active = not yet marked ``deleted_at``. Soft-deleted entries are
-    skipped (they are already considered gone on I14Y per our records).
+    skipped (already considered gone on I14Y per our records).
     On success, entries are soft-deleted in the state file.
     """
     result = SyncResult()
     state = SyncState(state_path)
     source_ids = sorted(state.all_source_ids())
 
-    logger.warning("PURGE: %d active datasets will be deleted from I14Y", len(source_ids))
+    logger.warning("PURGE: %d active records will be deleted from I14Y", len(source_ids))
 
     if dry_run:
         result.deleted = source_ids
         return result
 
-    for source_id in source_ids:
-        i14y_id = state.get_i14y_id(source_id)
-        _sync_delete(client, source_id, i14y_id, state, result)
-
-    state.save()
+    try:
+        _run_delete_phase(resource, source_ids, state, result)
+    finally:
+        state.save()
     return result
 
 
-def _sync_create(
+def purge(
     client: I14YClient,
+    *,
+    kind: str,
+    state_path: Path,
+    dry_run: bool = False,
+) -> SyncResult:
+    """Delete every active record of the given resource ``kind`` from I14Y."""
+    resource, _ = _resource_for(client, kind)
+    return purge_records(resource, state_path=state_path, dry_run=dry_run)
+
+
+def _split_extras(record: dict) -> tuple[dict, dict | None]:
+    extras = record.get(EXTRAS_KEY)
+    model_input = {k: v for k, v in record.items() if k != EXTRAS_KEY}
+    return model_input, extras
+
+
+def _apply_extras_safely(
+    resource: ResourceClient, i14y_id: UUID | str, extras: dict, source_id: str, verb: str,
+) -> None:
+    try:
+        resource.apply_extras(i14y_id, extras)
+    except Exception as exc:
+        logger.warning("%s %s but failed to apply extras: %s", verb, source_id, exc)
+
+
+def _sync_create(
+    resource: ResourceClient,
+    model_class: type[BaseModel],
     source_id: str,
     record: dict,
     state: SyncState,
@@ -327,19 +501,18 @@ def _sync_create(
     transform_version: int | None = None,
 ) -> None:
     try:
-        model = DcatDatasetInputModel.model_validate(record)
-        i14y_id = client.datasets.create(model)
+        model_input, extras = _split_extras(record)
+        model = model_class.model_validate(model_input)
+        i14y_id = resource.create(model)
         logger.info("Created %s → %s", source_id, i14y_id)
 
-        # Set initial publication level and registration status
+        if extras:
+            _apply_extras_safely(resource, i14y_id, extras, source_id, "Created")
+
         try:
-            client.datasets.set_publication_level(i14y_id, "Public")
-            time.sleep(0.5)
-            client.datasets.set_registration_status(i14y_id, "Recorded")
+            resource.publish_initial(i14y_id)
         except Exception as exc:
-            logger.warning(
-                "Created %s but failed to set status: %s", source_id, exc
-            )
+            logger.warning("Created %s but failed to publish: %s", source_id, exc)
 
         modified = _normalize_modified(record.get("modified"))
         if modified is None:
@@ -349,7 +522,6 @@ def _sync_create(
                 source_id, modified,
             )
         state.add(source_id, str(i14y_id), modified, transform_version=transform_version)
-        state.save()
         result.created.append(source_id)
     except Exception as exc:
         logger.error("Failed to create %s: %s", source_id, exc)
@@ -357,7 +529,8 @@ def _sync_create(
 
 
 def _sync_update(
-    client: I14YClient,
+    resource: ResourceClient,
+    model_class: type[BaseModel],
     source_id: str,
     i14y_id: str,
     record: dict,
@@ -368,9 +541,12 @@ def _sync_update(
     transform_version: int | None = None,
 ) -> None:
     try:
-        model = DcatDatasetInputModel.model_validate(record)
-        client.datasets.update(i14y_id, model)
+        model_input, extras = _split_extras(record)
+        model = model_class.model_validate(model_input)
+        resource.update(i14y_id, model)
         logger.info("Updated %s (%s)", source_id, i14y_id)
+        if extras:
+            _apply_extras_safely(resource, i14y_id, extras, source_id, "Updated")
         state.add(source_id, i14y_id, source_modified, transform_version=transform_version)
         result.updated.append(source_id)
     except Exception as exc:
@@ -379,17 +555,14 @@ def _sync_update(
 
 
 def _sync_delete(
-    client: I14YClient,
+    resource: ResourceClient,
     source_id: str,
     i14y_id: str,
     state: SyncState,
     result: SyncResult,
 ) -> None:
     try:
-        # I14Y requires setting publication level to Internal before deletion
-        client.datasets.set_publication_level(i14y_id, "Internal")
-        time.sleep(0.5)
-        client.datasets.delete(i14y_id)
+        resource.decommission_and_delete(i14y_id)
         logger.info("Deleted %s (%s)", source_id, i14y_id)
         state.remove(source_id)
         result.deleted.append(source_id)

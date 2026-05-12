@@ -6,7 +6,7 @@ per resource).
 """
 
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Callable, Literal, Protocol
 
 import dlt
 from dlt.sources import DltSource
@@ -15,12 +15,25 @@ from pydantic import BaseModel
 from metadataswiss_connector.dcat.transforms import run_transform
 
 
+# Which I14Y entity a transformed record targets. Drives sync routing
+# (datasets endpoint vs concepts endpoint, identifier shape, state file).
+ResourceKind = Literal["dataset", "concept"]
+
+
 class TransformFn(Protocol):
     """Contract for mapping a raw record to an I14Y DCAT model.
 
     ``children`` carries dlt-flattened 1:n child tables keyed by the
     child field name (e.g. ``"tags"`` → ``["foo", "bar"]``). Sources
     that don't use children can ignore the argument.
+
+    The return value is either the typed Pydantic model alone, or a
+    ``(model, extras)`` tuple. ``extras`` is a JSON-serialisable dict
+    carrying sidecar payloads that the I14Y model itself can't hold —
+    e.g. code-list entries, which I14Y publishes via a separate bulk
+    endpoint after the parent concept is created. Extras are stored
+    alongside the transformed record and replayed by sync as a
+    post-create/update follow-up call.
     """
 
     def __call__(
@@ -30,7 +43,20 @@ class TransformFn(Protocol):
         *,
         lookups: dict[str, list[dict]],
         publisher: str,
-    ) -> BaseModel: ...
+    ) -> BaseModel | tuple[BaseModel, dict]: ...
+
+
+@dataclass(frozen=True)
+class ResourceSpec:
+    """How one dlt resource is mapped + published to I14Y.
+
+    Attributes:
+        transform: Function mapping a raw record to an I14Y input model.
+        kind: Which I14Y entity the model targets — controls sync routing.
+    """
+
+    transform: TransformFn
+    kind: ResourceKind = "dataset"
 
 
 @dataclass(frozen=True)
@@ -42,7 +68,7 @@ class CatalogSource:
         dlt_source_factory: Zero-arg callable returning a configured
               ``DltSource``. A factory (not an instance) lets each run
               build a fresh source with current credentials.
-        resources: Maps dlt resource name → transform function.
+        resources: Maps dlt resource name → ResourceSpec (transform + kind).
         publisher: Optional publisher override. If ``None``, the caller's
               global publisher (e.g. from ``I14YConfig``) is used.
         transform_version: Bumped manually when transform logic changes.
@@ -53,7 +79,7 @@ class CatalogSource:
 
     name: str
     dlt_source_factory: Callable[[], DltSource]
-    resources: dict[str, TransformFn]
+    resources: dict[str, ResourceSpec]
     publisher: str | None = None
     transform_version: int = 1
 
@@ -79,7 +105,7 @@ def run_source(
 
     run_transform(
         pipeline_raw=raw_pipeline,
-        transform_fns=source.resources,
+        resources=source.resources,
         destination=destination,
         publisher=effective_publisher,
     )

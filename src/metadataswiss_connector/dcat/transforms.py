@@ -5,9 +5,10 @@ applies a source-specific transform function, and loads the result into
 the ``i14y_dcat`` dataset.
 """
 
+import json
 import logging
 from collections import defaultdict
-from typing import Callable, Generator
+from typing import TYPE_CHECKING, Callable, Generator
 
 import dlt
 import duckdb
@@ -16,20 +17,33 @@ from pydantic import BaseModel, ValidationError
 
 from metadataswiss_connector.resources import DUCKDB_PATH
 
+if TYPE_CHECKING:
+    from metadataswiss_connector.registry import ResourceSpec
+
 logger = logging.getLogger(__name__)
+
+# Column used to carry post-sync sidecar payloads through DuckDB. Stored
+# as a JSON string so dlt doesn't normalise it into nested child tables.
+EXTRAS_COLUMN = "_extras_json"
+
+# Key under which extras are surfaced on records read back from DuckDB
+# and consumed by sync. Underscored to keep it visually distinct from
+# I14Y model fields.
+EXTRAS_KEY = "__extras__"
 
 
 def run_transform(
     pipeline_raw: dlt.Pipeline,
-    transform_fns: dict[str, Callable[..., BaseModel]],
+    resources: "dict[str, ResourceSpec]",
     destination,
     *,
     publisher: str,
 ) -> None:
-    """Transform raw resources to I14Y DCAT and load into DuckDB.
+    """Transform raw resources to I14Y input models and load into DuckDB.
 
-    ``transform_fns`` maps each raw resource/table name to its transform
-    function, allowing one source to carry multiple resource types.
+    ``resources`` maps each raw resource/table name to its ResourceSpec
+    (transform + target kind), allowing one source to carry multiple
+    resource types.
     """
     pipeline_dcat = dlt.pipeline(
         pipeline_name=f"{pipeline_raw.pipeline_name}_dcat",
@@ -37,10 +51,10 @@ def run_transform(
         dataset_name="i14y_dcat",
     )
 
-    for resource_name, transform_fn in transform_fns.items():
+    for resource_name, spec in resources.items():
         load_info = pipeline_dcat.run(
             _read_and_transform(
-                pipeline_raw, resource_name, transform_fn, publisher=publisher
+                pipeline_raw, resource_name, spec.transform, publisher=publisher
             ),
             table_name=resource_name,
             write_disposition="replace",
@@ -82,7 +96,7 @@ def _read_and_transform(
                         record.get("id"), []
                     )
                 try:
-                    model = transform_fn(
+                    result = transform_fn(
                         record, children, lookups=lookups, publisher=publisher
                     )
                 except ValidationError as exc:
@@ -96,7 +110,14 @@ def _read_and_transform(
                         ),
                     )
                     continue
-                yield model.model_dump(by_alias=True, exclude_none=True, mode="json")
+                if isinstance(result, tuple):
+                    model, extras = result
+                else:
+                    model, extras = result, None
+                out = model.model_dump(by_alias=True, exclude_none=True, mode="json")
+                if extras:
+                    out[EXTRAS_COLUMN] = json.dumps(extras)
+                yield out
 
 
 def read_transformed(
@@ -124,11 +145,20 @@ def read_transformed(
             flat = dict(zip(columns, row))
             dlt_id = flat.pop("_dlt_id", None)
             flat.pop("_dlt_load_id", None)
+            extras_raw = flat.pop(EXTRAS_COLUMN, None)
             record = _unflatten(flat)
             # Attach child table data
             for child_name, child_rows in child_tables.items():
                 if dlt_id in child_rows:
                     record[child_name] = child_rows[dlt_id]
+            if extras_raw:
+                try:
+                    record[EXTRAS_KEY] = json.loads(extras_raw)
+                except (ValueError, TypeError):
+                    logger.warning(
+                        "Failed to decode extras column on %s id=%r",
+                        table_name, record.get("identifier") or record.get("id"),
+                    )
             results.append(record)
         return results
     finally:

@@ -1,14 +1,65 @@
 import logging
-import time
-from email.utils import parsedate_to_datetime
 
 import dlt
-from dlt.sources.helpers.rest_client import RESTClient
 from dlt.sources.rest_api import rest_api_resources
 
 logger = logging.getLogger(__name__)
 
 from metadataswiss_connector.sources.dataspot.auth import DataspotAuth
+from metadataswiss_connector.sources.dataspot.constants import (
+    PUBLIC_STATE,
+    STEREOTYPE_ORGANIZATIONAL_UNIT,
+)
+from metadataswiss_connector.sources.dataspot.enrichment import DataspotEnrichment
+
+
+def _is_public(item: dict) -> bool:
+    return item.get("publicState") == PUBLIC_STATE
+
+
+def _public_resource(
+    name: str,
+    path: str,
+    data_selector: str,
+    *,
+    parent: bool = False,
+    ignore_404: bool = False,
+    ignore_500: bool = False,
+) -> dict:
+    """Build a dlt rest_api resource spec for a public Dataspot endpoint.
+
+    All Dataspot endpoints we consume share the same shape: a single page
+    of HAL-style ``_embedded`` entries that we filter to ``publicState ==
+    PUBLIC``. ``parent=True`` marks the spec as a child resource so dlt's
+    rest_api transformer wires up ``include_from_parent``; ``ignore_404``
+    silences missing children (collections without distributions etc.).
+    """
+    endpoint: dict = {
+        "path": path,
+        "paginator": "single_page",
+        "data_selector": data_selector,
+    }
+    response_actions: list[dict] = []
+    if ignore_404:
+        response_actions.append({"status_code": 404, "action": "ignore"})
+    if ignore_500:
+        response_actions.append({"status_code": 500, "action": "ignore"})
+    if response_actions:
+        endpoint["response_actions"] = response_actions
+    spec: dict = {
+        "name": name,
+        "endpoint": endpoint,
+        "processing_steps": [{"filter": _is_public}],
+    }
+    if parent:
+        spec["primary_key"] = "id"
+        spec["write_disposition"] = "merge"
+        spec["include_from_parent"] = ["id"]
+    return spec
+
+
+def _as_list(items):
+    return [items] if isinstance(items, dict) else items
 
 
 @dlt.source(name="dataspot")
@@ -50,168 +101,59 @@ def dataspot_source(
     api_base_url = f"{base_url}/rest/{database_name}"
 
     config = {
-        "client": {
-            "base_url": api_base_url,
-            "auth": auth,
-        },
-        "resource_defaults": {
-            "primary_key": "id",
-            "write_disposition": "merge",
-        },
+        "client": {"base_url": api_base_url, "auth": auth},
+        "resource_defaults": {"primary_key": "id", "write_disposition": "merge"},
         "resources": [
-            {
-                "name": "data_products",
-                "endpoint": {
-                    "path": "schemes/Datenprodukte/datasets",
-                    "paginator": "single_page",
-                    "data_selector": "_embedded.datasets",
-                },
-                "processing_steps": [
-                    {
-                        "filter": lambda x: x["publicState"] == "PUBLIC"
-                    },
-                ],
-            },
-            {
-                "name": "distributions",
-                "primary_key": "id",
-                "write_disposition": "merge",
-                "endpoint": {
-                    "path": "datasets/{resources.data_products.id}/distributions",
-                    "paginator": "single_page",
-                    "data_selector": "_embedded.distributions",
-                    "response_actions": [
-                        {"status_code": 404, "action": "ignore"},
-                    ],
-                },
-                "processing_steps": [
-                    {
-                        "filter": lambda x: x["publicState"] == "PUBLIC"
-                    },
-                ],
-                "include_from_parent": ["id"],
-            },
+            _public_resource(
+                "data_products",
+                "schemes/Datenprodukte/datasets",
+                "_embedded.datasets",
+            ),
+            _public_resource(
+                "code_lists",
+                "schemes/Referenzdaten/enumerations",
+                "_embedded.enumerations",
+            ),
+            _public_resource(
+                "code_list_entries",
+                "schemes/Referenzdaten/enumerations/{resources.code_lists.id}/literals",
+                "_embedded.literals",
+                parent=True,
+                ignore_404=True,
+            ),
+            _public_resource(
+                "distributions",
+                "datasets/{resources.data_products.id}/distributions",
+                "_embedded.distributions",
+                parent=True,
+                ignore_404=True,
+            ),
+            _public_resource(
+                "compositions",
+                "datasets/{resources.data_products.id}/compositions",
+                "_embedded.compositions",
+                parent=True,
+                ignore_404=True,
+                # Dataspot returns 500 on compositions for some datasets
+                # (server-side bug). Skip rather than fail the whole run.
+                ignore_500=True,
+            ),
         ],
     }
 
     resources = list(rest_api_resources(config))
     data_products = next(r for r in resources if r.name == "data_products")
+    compositions = next(r for r in resources if r.name == "compositions")
 
-    client = RESTClient(base_url=base_url, auth=auth)
-    staatskalender_client = RESTClient(base_url="https://staatskalender.bs.ch/api")
-    parent_cache: dict[str, dict] = {}
-    agency_cache: dict[int, dict | None] = {}
-    data_owner_name_cache: dict[str, str | None] = {}
-    post_agent_label_cache: dict[str, str | None] = {}
+    enrichment = DataspotEnrichment(
+        base_url=base_url, database_name=database_name, auth=auth
+    )
 
-    # Role UUID identifying the "data owner" attribution in Dataspot.
-    # The collection's ``attributedTo`` endpoint returns Attribution
-    # objects whose ``attributedTo`` value points to a Post (a role-
-    # binding), not directly to a Person. The Post's ``postAgents`` link
-    # resolves to the Person(s) currently holding that post.
-    DATA_OWNER_ROLE_UUID = "02222f05-5690-4cb8-8d90-c27ca57e98e9"
-
-    def _fetch_post_agent_label(post_id: str) -> str | None:
-        if post_id in post_agent_label_cache:
-            return post_agent_label_cache[post_id]
-        try:
-            payload = client.get(
-                f"/rest/{database_name}/posts/{post_id}/postAgents"
-            ).json()
-        except Exception as exc:
-            logger.warning("postAgents fetch failed for %s: %s", post_id, exc)
-            post_agent_label_cache[post_id] = None
-            return None
-        for person in payload.get("_embedded", {}).get("postAgents", []) or []:
-            if person.get("publicState") and person["publicState"] != "PUBLIC":
-                continue
-            label = person.get("label")
-            if label:
-                post_agent_label_cache[post_id] = label
-                return label
-        post_agent_label_cache[post_id] = None
-        return None
-
-    def _fetch_data_owner_name(href: str) -> str | None:
-        if href in data_owner_name_cache:
-            return data_owner_name_cache[href]
-        try:
-            payload = client.get(href).json()
-        except Exception as exc:
-            logger.warning("attributedTo fetch failed for %s: %s", href, exc)
-            data_owner_name_cache[href] = None
-            return None
-        name: str | None = None
-        for entry in payload.get("_embedded", {}).get("attributedTo", []) or []:
-            if entry.get("attributedAs") != DATA_OWNER_ROLE_UUID:
-                continue
-            post_id = entry.get("attributedTo")
-            if not post_id:
-                continue
-            name = _fetch_post_agent_label(post_id)
-            if name:
-                break
-        data_owner_name_cache[href] = name
-        return name
-
-    def _fetch_parent(href: str) -> dict:
-        if href not in parent_cache:
-            parent_cache[href] = client.get(href).json()
-        return parent_cache[href]
-
-    def _staatskalender_get(url: str, max_retries: int = 3) -> dict | None:
-        for attempt in range(max_retries):
-            response = staatskalender_client.get(url)
-            if response.status_code == 429:
-                reset = response.headers.get("x-ratelimit-reset")
-                wait = 60.0
-                if reset:
-                    try:
-                        delta = parsedate_to_datetime(reset).timestamp() - time.time()
-                        wait = max(1.0, min(delta + 1.0, 900.0))
-                    except (TypeError, ValueError):
-                        pass
-                logger.warning(
-                    "staatskalender rate limited on %s; sleeping %.0fs (attempt %d/%d)",
-                    url, wait, attempt + 1, max_retries,
-                )
-                time.sleep(wait)
-                continue
-            if response.status_code >= 400:
-                logger.warning(
-                    "staatskalender %s returned %d; skipping",
-                    url, response.status_code,
-                )
-                return None
-            return response.json()
-        logger.warning("staatskalender %s still rate-limited after retries; skipping", url)
-        return None
-
-    def _fetch_agency(state_calendar_id: int) -> dict | None:
-        if state_calendar_id in agency_cache:
-            return agency_cache[state_calendar_id]
-        payload = _staatskalender_get(f"agencies/{state_calendar_id}")
-        item: dict | None = None
-        if payload is not None:
-            items = payload.get("collection", {}).get("items") or []
-            if items:
-                item = items[0]
-        agency_cache[state_calendar_id] = item
-        return item
-
-    def _walk_ancestors(item):
-        href = item.get("_links", {}).get("inCollection", {}).get("href")
-        while href:
-            parent = _fetch_parent(href)
-            if (
-                parent.get("publicState")
-                and parent["publicState"] != "PUBLIC"
-            ):
-                return
-            yield href, parent
-            href = (
-                parent.get("_links", {}).get("inCollection", {}).get("href")
-            )
+    def _iter_ancestor_pairs(items):
+        """Yield (item, depth, href, collection) for every (dataset, ancestor)."""
+        for item in _as_list(items):
+            for depth, (href, collection) in enumerate(enrichment.walk_ancestors(item)):
+                yield item, depth, href, collection
 
     @dlt.transformer(
         data_from=data_products,
@@ -220,15 +162,12 @@ def dataspot_source(
         write_disposition="merge",
     )
     def collections(items):
-        if isinstance(items, dict):
-            items = [items]
         emitted: set[str] = set()
-        for item in items:
-            for href, parent in _walk_ancestors(item):
-                if href in emitted:
-                    continue
-                emitted.add(href)
-                yield parent
+        for _item, _depth, href, collection in _iter_ancestor_pairs(items):
+            if href in emitted:
+                continue
+            emitted.add(href)
+            yield collection
 
     @dlt.transformer(
         data_from=data_products,
@@ -237,16 +176,12 @@ def dataspot_source(
         write_disposition="merge",
     )
     def dataset_collection_path(items):
-        if isinstance(items, dict):
-            items = [items]
-        for item in items:
-            dataset_id = item.get("id")
-            for depth, (_href, parent) in enumerate(_walk_ancestors(item)):
-                yield {
-                    "dataset_id": dataset_id,
-                    "collection_id": parent.get("id"),
-                    "depth": depth,
-                }
+        for item, depth, _href, collection in _iter_ancestor_pairs(items):
+            yield {
+                "dataset_id": item.get("id"),
+                "collection_id": collection.get("id"),
+                "depth": depth,
+            }
 
     @dlt.transformer(
         data_from=collections,
@@ -255,17 +190,15 @@ def dataspot_source(
         write_disposition="merge",
     )
     def collection_agencies(collection_items):
-        if isinstance(collection_items, dict):
-            collection_items = [collection_items]
-        for collection in collection_items:
-            if collection.get("stereotype") != "organizationalUnit":
+        for collection in _as_list(collection_items):
+            if collection.get("stereotype") != STEREOTYPE_ORGANIZATIONAL_UNIT:
                 continue
-            state_calendar_id = (
-                collection.get("customProperties", {}).get("stateCalendarId")
+            state_calendar_id = collection.get("customProperties", {}).get(
+                "stateCalendarId"
             )
             if state_calendar_id is None:
                 continue
-            agency = _fetch_agency(int(state_calendar_id))
+            agency = enrichment.fetch_agency(int(state_calendar_id))
             if agency is None:
                 continue
             data = {
@@ -287,30 +220,106 @@ def dataspot_source(
         write_disposition="merge",
     )
     def collection_data_owners(items):
-        # Walk ancestors directly from data_products instead of consuming
-        # the ``collections`` transformer: dlt's pipe is single-consumer,
-        # and ``collection_agencies`` already drains it.
-        if isinstance(items, dict):
-            items = [items]
+        # Walks ancestors directly from data_products rather than from
+        # ``collections``: dlt pipes are single-consumer, and
+        # ``collection_agencies`` already drains that one.
         emitted: set[str] = set()
-        for item in items:
-            for _href, collection in _walk_ancestors(item):
-                collection_id = collection.get("id")
-                if not collection_id or collection_id in emitted:
-                    continue
-                emitted.add(collection_id)
-                attr_href = (
-                    collection.get("_links", {}).get("attributedTo", {}).get("href")
-                )
-                if not attr_href:
-                    continue
-                name = _fetch_data_owner_name(attr_href)
-                if not name:
-                    continue
-                yield {
-                    "collection_id": collection_id,
-                    "name": name,
-                }
+        for _item, _depth, _href, collection in _iter_ancestor_pairs(items):
+            collection_id = collection.get("id")
+            if not collection_id or collection_id in emitted:
+                continue
+            emitted.add(collection_id)
+            attr_href = (
+                collection.get("_links", {}).get("attributedTo", {}).get("href")
+            )
+            if not attr_href:
+                continue
+            name = enrichment.fetch_data_owner_name(attr_href)
+            if not name:
+                continue
+            yield {"collection_id": collection_id, "name": name}
+
+    @dlt.transformer(
+        data_from=compositions,
+        name="attributes",
+        primary_key="id",
+        write_disposition="merge",
+    )
+    def attributes(items):
+        emitted: set[str] = set()
+        for composition in _as_list(items):
+            href = (
+                composition.get("_links", {}).get("composedOf", {}).get("href")
+            )
+            if not href or href in emitted:
+                continue
+            emitted.add(href)
+            attribute = enrichment.fetch_attribute(href)
+            if not _is_public(attribute):
+                continue
+            yield attribute
+
+    @dlt.transformer(
+        data_from=compositions,
+        name="dataset_structure_components",
+        primary_key="composition_id",
+        write_disposition="replace",
+    )
+    def dataset_structure_components(items):
+        """Per (dataset, attribute) row with everything SHACL needs.
+
+        Joins composition → attribute → datatype eagerly so the dataset
+        transform can build a Turtle SHACL document without further API
+        calls. ``replace`` semantics: a structure that loses an attribute
+        in Dataspot must lose it on the I14Y side too.
+        """
+        for composition in _as_list(items):
+            attr_href = (
+                composition.get("_links", {}).get("composedOf", {}).get("href")
+            )
+            if not attr_href:
+                continue
+            attribute = enrichment.fetch_attribute(attr_href)
+            if not _is_public(attribute):
+                continue
+            # Some compositions point back at a Dataset rather than at a
+            # real attribute (Dataspot GEO stereotype quirk). Those would
+            # produce nonsensical sh:property rows, so drop them.
+            if attribute.get("_type") not in {"UmlAttribute", "BusinessAttribute"}:
+                continue
+            dt_href = (
+                attribute.get("_links", {}).get("hasRange", {}).get("href")
+            )
+            datatype = enrichment.fetch_datatype(dt_href) if dt_href else {}
+            if datatype and not _is_public(datatype):
+                datatype = {}
+            # Enumerations sit at /enumerations/{id} and have
+            # _type=ReferenceObject; datatypes sit at /datatypes/{id} with
+            # _type=DataDomain. We surface the kind so the SHACL builder
+            # can emit dcterms:conformsTo for code-list-typed attributes.
+            datatype_kind = (datatype or {}).get("_type")
+            yield {
+                "dataset_id": composition.get("componentOf"),
+                "composition_id": composition.get("id"),
+                "order": composition.get("order"),
+                "composition_label": composition.get("label"),
+                "composition_title": composition.get("title"),
+                "composition_description": composition.get("description"),
+                "composition_required": (
+                    composition.get("customProperties", {}).get("required")
+                ),
+                "attribute_id": attribute.get("id"),
+                "attribute_label": attribute.get("label"),
+                "attribute_description": attribute.get("description"),
+                "attribute_required": attribute.get("required"),
+                "attribute_cardinality": attribute.get("cardinality"),
+                "attribute_min_inclusive": attribute.get("minInclusive"),
+                "attribute_max_inclusive": attribute.get("maxInclusive"),
+                "datatype_id": (datatype or {}).get("id"),
+                "datatype_kind": datatype_kind,
+                "datatype_base_type": (datatype or {}).get("baseType"),
+                "datatype_label": (datatype or {}).get("label"),
+            }
 
     return [
         *resources,
@@ -318,4 +327,6 @@ def dataspot_source(
         dataset_collection_path,
         collection_agencies,
         collection_data_owners,
+        attributes,
+        dataset_structure_components,
     ]

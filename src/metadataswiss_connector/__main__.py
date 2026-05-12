@@ -26,7 +26,7 @@ from metadataswiss_connector.resources import (
     raw_pipeline_for,
 )
 from metadataswiss_connector.sources import SOURCES
-from metadataswiss_connector.sync import purge_all, sync_datasets
+from metadataswiss_connector.sync import SyncResult, purge, sync
 
 DEFAULT_SYNC_LIMIT = 5
 ALL_STEPS = ("extract", "transform", "publish")
@@ -52,8 +52,14 @@ def _parse_steps(raw: str | None) -> tuple[str, ...]:
 
 def _cmd_list(_: argparse.Namespace) -> int:
     for s in SOURCES:
-        print(f"{s.name}\t{', '.join(s.resources)}")
+        cells = [f"{name}({spec.kind})" for name, spec in s.resources.items()]
+        print(f"{s.name}\t{', '.join(cells)}")
     return 0
+
+
+def _state_path(source_name: str, resource_name: str) -> Path:
+    """One state file per (source, resource) pair."""
+    return Path(f"data/{source_name}_{resource_name}_ids.json")
 
 
 def _step_extract(source: CatalogSource) -> None:
@@ -71,28 +77,39 @@ def _step_transform(source: CatalogSource) -> None:
     publisher = source.publisher or cfg.publisher
     run_transform(
         pipeline_raw=raw_pipeline_for(source),
-        transform_fns=source.resources,
+        resources=source.resources,
         destination=duckdb_destination(),
         publisher=publisher,
     )
 
 
 def _step_publish(source: CatalogSource, limit: int | None = DEFAULT_SYNC_LIMIT) -> None:
-    records: list[dict] = []
-    for resource_name in source.resources:
-        records.extend(read_transformed(resource_name, limit=limit))
-    if not records:
-        logger.warning("no transformed records for %s — skipping publish", source.name)
-        return
-    state_path = Path(f"data/{source.name}_dataset_ids.json")
     with i14y_client_from_env() as client:
-        result = sync_datasets(
-            client,
-            records,
-            state_path=state_path,
-            transform_version=source.transform_version,
-        )
-    logger.info("publish complete for %s: %s", source.name, result.summary())
+        for resource_name, spec in source.resources.items():
+            records = read_transformed(resource_name, limit=limit)
+            if not records:
+                logger.warning(
+                    "no transformed records for %s.%s — skipping",
+                    source.name, resource_name,
+                )
+                continue
+            try:
+                result = sync(
+                    client,
+                    records,
+                    kind=spec.kind,
+                    state_path=_state_path(source.name, resource_name),
+                    transform_version=source.transform_version,
+                )
+            except ValueError as exc:
+                logger.error(
+                    "publish %s.%s: %s", source.name, resource_name, exc,
+                )
+                continue
+            logger.info(
+                "publish %s.%s: %s",
+                source.name, resource_name, result.summary(),
+            )
 
 
 _STEP_FNS = {
@@ -117,24 +134,35 @@ def _run_one(
 
 def _cmd_purge(args: argparse.Namespace) -> int:
     source = _by_name(args.source)
-    state_path = Path(f"data/{source.name}_dataset_ids.json")
+    targets: list[tuple[str, str, Path]] = []
+    for resource_name, spec in source.resources.items():
+        path = _state_path(source.name, resource_name)
+        if path.exists():
+            targets.append((resource_name, spec.kind, path))
 
-    if not state_path.exists():
-        logger.error("no state file at %s — nothing to purge", state_path)
+    if not targets:
+        logger.error(
+            "no state files for %s — nothing to purge (looked for data/%s_*_ids.json)",
+            source.name, source.name,
+        )
         return 1
 
     if args.dry_run:
         with i14y_client_from_env() as client:
-            result = purge_all(client, state_path=state_path, dry_run=True)
-        logger.info("DRY RUN — would delete %d datasets from I14Y", len(result.deleted))
-        for sid in result.deleted:
-            print(sid)
+            for resource_name, kind, path in targets:
+                result = purge(client, kind=kind, state_path=path, dry_run=True)
+                logger.info(
+                    "DRY RUN %s.%s — would delete %d records",
+                    source.name, resource_name, len(result.deleted),
+                )
+                for sid in result.deleted:
+                    print(f"{resource_name}\t{sid}")
         return 0
 
     if not args.yes:
         print(
-            f"About to delete all active datasets for source {source.name!r} "
-            f"(state file: {state_path}) from I14Y.",
+            f"About to delete all active records for source {source.name!r} "
+            f"across resources {[t[0] for t in targets]} from I14Y.",
             file=sys.stderr,
         )
         confirm = input("Type 'DELETE' to confirm: ")
@@ -142,9 +170,16 @@ def _cmd_purge(args: argparse.Namespace) -> int:
             logger.info("aborted")
             return 1
 
+    aggregated = SyncResult()
     with i14y_client_from_env() as client:
-        result = purge_all(client, state_path=state_path)
-    logger.info("purge complete for %s: %s", source.name, result.summary())
+        for resource_name, kind, path in targets:
+            result = purge(client, kind=kind, state_path=path)
+            logger.info(
+                "purge %s.%s: %s", source.name, resource_name, result.summary(),
+            )
+            aggregated.deleted.extend(result.deleted)
+            aggregated.failed.extend(result.failed)
+    logger.info("purge complete for %s: %s", source.name, aggregated.summary())
     return 0
 
 
