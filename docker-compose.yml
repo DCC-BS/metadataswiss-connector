@@ -1,0 +1,93 @@
+# Production deployment for the metadataswiss connector.
+#
+# Four services on one host:
+#   postgres        — Dagster run/event/schedule storage
+#   connector_code  — gRPC server hosting the connector code; ALL runs
+#                     execute here, so the DuckDB + state volume lives here
+#   webserver       — Dagster UI (http://<host>:3000)
+#   daemon          — drives schedules, the run queue and sensors
+#
+# Secrets come from the app `.env` (same file used locally). Postgres
+# credentials default to dev values below; override them via the shell or a
+# compose `.env` for a real deployment.
+
+x-pg-env: &pg-env
+  DAGSTER_PG_USERNAME: ${DAGSTER_PG_USERNAME:-dagster}
+  DAGSTER_PG_PASSWORD: ${DAGSTER_PG_PASSWORD:-dagster}
+  DAGSTER_PG_HOST: postgres
+  DAGSTER_PG_DB: ${DAGSTER_PG_DB:-dagster}
+  DAGSTER_HOME: /opt/dagster/dagster_home
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${DAGSTER_PG_USERNAME:-dagster}
+      POSTGRES_PASSWORD: ${DAGSTER_PG_PASSWORD:-dagster}
+      POSTGRES_DB: ${DAGSTER_PG_DB:-dagster}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DAGSTER_PG_USERNAME:-dagster}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  connector_code:
+    build: .
+    # Inherits the image CMD (dagster api grpc … on :4000).
+    env_file: .env
+    environment:
+      <<: *pg-env
+      # Runtime-writable paths INSIDE the container. They live on bind-mounted
+      # host directories (see volumes below), so a local Docker run reads and
+      # writes the SAME state files + DuckDB as a bare `dagster dev`.
+      DUCKDB_PATH: /mnt/duckdb/${DUCKDB_FILENAME:-metadata.duckdb}
+      CONNECTOR_DATA_DIR: /mnt/state
+    volumes:
+      # Host paths are configurable via .env; defaults reuse the in-repo
+      # locations (./data for the state files, repo root for the DuckDB).
+      - ${HOST_STATE_DIR:-./data}:/mnt/state
+      - ${HOST_DUCKDB_DIR:-.}:/mnt/duckdb
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "dagster", "api", "grpc-health-check", "-p", "4000"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  webserver:
+    build: .
+    command:
+      ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000",
+       "-w", "/opt/dagster/workspace.yaml"]
+    environment:
+      <<: *pg-env
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      connector_code:
+        condition: service_healthy
+    restart: unless-stopped
+
+  daemon:
+    build: .
+    command:
+      ["dagster-daemon", "run", "-w", "/opt/dagster/workspace.yaml"]
+    environment:
+      <<: *pg-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      connector_code:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

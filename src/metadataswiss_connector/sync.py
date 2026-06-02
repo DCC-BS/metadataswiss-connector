@@ -5,10 +5,17 @@ transformed records against a per-resource state file via any I14Y
 resource client that exposes the standard CRUD + lifecycle operations.
 The public `sync` / `purge` entrypoints dispatch on a ``kind`` string
 (``"dataset"`` / ``"concept"``) via the ``_KINDS`` registry.
+
+Change detection is hash-based: each transformed record is canonically
+serialised and hashed; the digest is persisted alongside the I14Y id and
+compared on the next run. Any change to the transform logic, the source
+data, or upstream lookups that affects the published payload flips the
+hash and forces a re-publish — no manual version bumps required.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -19,9 +26,13 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-from i14y_client import I14YClient
-from i14y_client.models import CodeListConceptInput, DcatDatasetInputModel
-from metadataswiss_connector.dcat.transforms import EXTRAS_KEY
+from i14y_client import I14YClient, log_context
+from i14y_client.models import (
+    CodeListConceptInput,
+    DataServiceInputModel,
+    DcatDatasetInputModel,
+)
+from metadataswiss_connector.dcat.duckdb_io import EXTRAS_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +60,51 @@ def _concept_source_id(record: dict) -> str:
     return str(record["identifier"])
 
 
+def payload_hash(record: dict) -> str:
+    """SHA-256 over a canonical JSON serialisation of the full record.
+
+    ``default=str`` coerces datetimes (and any other non-JSON-native
+    values dlt may surface) deterministically. ``sort_keys`` ensures
+    dict ordering doesn't perturb the digest. Extras are included
+    because they're part of the published payload.
+    """
+    canonical = json.dumps(record, sort_keys=True, default=str, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@dataclass
+class FailedRecord:
+    """A record that could not be published to I14Y.
+
+    Carries the source identifier (dataspot UUID), the error text, and —
+    when available — a human-readable title so the alert email can name
+    the record instead of only showing its opaque UUID.
+    """
+
+    source_id: str
+    error: str
+    title: str | None = None
+
+    def __str__(self) -> str:
+        label = f"{self.title} " if self.title else ""
+        return f"{label}[{self.source_id}]: {self.error}"
+
+
+def _transformed_title(record: dict) -> str | None:
+    """Best-effort human title from an already-transformed I14Y record.
+
+    Datasets/data services carry a multi-language ``title`` dict, concepts
+    a ``name`` dict; fall back to German then any language.
+    """
+    for key in ("title", "name"):
+        value = record.get(key)
+        if isinstance(value, dict):
+            return value.get("de") or next(iter(value.values()), None)
+        if value:
+            return str(value)
+    return None
+
+
 @dataclass
 class SyncResult:
     """Summary of a sync run."""
@@ -57,7 +113,7 @@ class SyncResult:
     updated: list[str] = field(default_factory=list)
     unchanged: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
-    failed: list[tuple[str, str]] = field(default_factory=list)
+    failed: list[FailedRecord] = field(default_factory=list)
 
     def summary(self) -> str:
         parts = []
@@ -75,10 +131,11 @@ class SyncResult:
 
 
 class SyncState:
-    """Persistent mapping of source identifier → I14Y UUID.
+    """Persistent mapping of source identifier → I14Y UUID + payload hash.
 
     Stored as a JSON file so the sync knows which records it owns on
-    I14Y without having to query the remote API.
+    I14Y without having to query the remote API, and can detect changes
+    to the transformed payload without re-publishing untouched records.
     """
 
     def __init__(self, path: Path) -> None:
@@ -106,17 +163,11 @@ class SyncState:
             return None
         return entry["id"]
 
-    def get_source_modified_at(self, source_id: str) -> str | None:
+    def get_payload_hash(self, source_id: str) -> str | None:
         entry = self._data.get(source_id)
         if not entry or entry.get("deleted_at"):
             return None
-        return entry.get("source_modified_at")
-
-    def get_transform_version(self, source_id: str) -> int | None:
-        entry = self._data.get(source_id)
-        if not entry or entry.get("deleted_at"):
-            return None
-        return entry.get("transform_version")
+        return entry.get("payload_hash")
 
     def contains(self, source_id: str) -> bool:
         entry = self._data.get(source_id)
@@ -126,8 +177,7 @@ class SyncState:
         self,
         source_id: str,
         i14y_id: str,
-        source_modified_at: str | None = None,
-        transform_version: int | None = None,
+        payload_hash: str,
     ) -> None:
         existing = self._data.get(source_id) or {}
         # Re-creation after a soft-delete: the I14Y UUID is new, so
@@ -139,16 +189,12 @@ class SyncState:
             created_at = now
         else:
             created_at = existing["created_at"]
-        entry: dict = {
+        self._data[source_id] = {
             "id": i14y_id,
+            "payload_hash": payload_hash,
             "created_at": created_at,
             "updated_at": now,
         }
-        if source_modified_at is not None:
-            entry["source_modified_at"] = source_modified_at
-        if transform_version is not None:
-            entry["transform_version"] = transform_version
-        self._data[source_id] = entry
 
     def remove(self, source_id: str) -> None:
         entry = self._data.get(source_id)
@@ -169,7 +215,6 @@ def sync_records(
     state_path: Path,
     dry_run: bool = False,
     force: bool = False,
-    transform_version: int | None = None,
 ) -> SyncResult:
     """Synchronise transformed records to I14Y via the given resource client.
 
@@ -184,13 +229,11 @@ def sync_records(
                        ``identifier``.
         state_path: Per-resource state file (one file per source+resource).
         dry_run: Compute the diff without calling the API.
-        force: Re-publish existing records regardless of modified date /
-               transform version.
-        transform_version: Current transform version. Records whose
-                          persisted version differs are re-published.
+        force: Re-publish existing records regardless of payload hash.
     """
     state = SyncState(state_path)
     source_by_id = _build_source_index(source_records, source_id_for)
+    hash_by_id = {sid: payload_hash(rec) for sid, rec in source_by_id.items()}
     to_create, to_check, to_delete = _compute_diff(set(source_by_id), state.all_source_ids())
 
     logger.info(
@@ -200,8 +243,7 @@ def sync_records(
 
     if dry_run:
         return _dry_run_result(
-            to_create, to_check, to_delete, source_by_id, state,
-            force=force, transform_version=transform_version,
+            to_create, to_check, to_delete, hash_by_id, state, force=force,
         )
 
     result = SyncResult()
@@ -210,11 +252,11 @@ def sync_records(
     try:
         _run_create_phase(
             resource, model_class, sorted(to_create), source_by_id,
-            state, result, transform_version=transform_version,
+            hash_by_id, state, result,
         )
         _run_update_phase(
             resource, model_class, sorted(to_check), source_by_id,
-            state, result, force=force, transform_version=transform_version,
+            hash_by_id, state, result, force=force,
         )
         _run_delete_phase(resource, sorted(to_delete), state, result)
     finally:
@@ -249,33 +291,21 @@ def _compute_diff(
 
 
 def _needs_update(
-    source_id: str, record: dict, state: SyncState,
-    *, force: bool, transform_version: int | None,
+    source_id: str, new_hash: str, state: SyncState, *, force: bool,
 ) -> bool:
     if force:
         return True
-    source_modified = _normalize_modified(record.get("modified"))
-    state_modified = state.get_source_modified_at(source_id)
-    state_version = state.get_transform_version(source_id)
-    if _is_unchanged(source_modified, state_modified) and _version_matches(
-        transform_version, state_version
-    ):
-        return False
-    return True
+    return state.get_payload_hash(source_id) != new_hash
 
 
 def _dry_run_result(
     to_create: set[str], to_check: set[str], to_delete: set[str],
-    source_by_id: dict[str, dict], state: SyncState,
-    *, force: bool, transform_version: int | None,
+    hash_by_id: dict[str, str], state: SyncState, *, force: bool,
 ) -> SyncResult:
     result = SyncResult()
     result.created = sorted(to_create)
     for source_id in sorted(to_check):
-        if _needs_update(
-            source_id, source_by_id[source_id], state,
-            force=force, transform_version=transform_version,
-        ):
+        if _needs_update(source_id, hash_by_id[source_id], state, force=force):
             result.updated.append(source_id)
         else:
             result.unchanged.append(source_id)
@@ -286,41 +316,34 @@ def _dry_run_result(
 def _run_create_phase(
     resource: ResourceClient, model_class: type[BaseModel],
     source_ids: list[str], source_by_id: dict[str, dict],
-    state: SyncState, result: SyncResult,
-    *, transform_version: int | None,
+    hash_by_id: dict[str, str], state: SyncState, result: SyncResult,
 ) -> None:
     for source_id in source_ids:
         _sync_create(
             resource, model_class, source_id, source_by_id[source_id],
-            state, result, transform_version=transform_version,
+            hash_by_id[source_id], state, result,
         )
 
 
 def _run_update_phase(
     resource: ResourceClient, model_class: type[BaseModel],
     source_ids: list[str], source_by_id: dict[str, dict],
-    state: SyncState, result: SyncResult,
-    *, force: bool, transform_version: int | None,
+    hash_by_id: dict[str, str], state: SyncState, result: SyncResult,
+    *, force: bool,
 ) -> None:
     for source_id in source_ids:
-        record = source_by_id[source_id]
-        if not _needs_update(
-            source_id, record, state,
-            force=force, transform_version=transform_version,
-        ):
-            logger.debug(
-                "Unchanged %s (modified=%s)",
-                source_id, _normalize_modified(record.get("modified")),
-            )
+        new_hash = hash_by_id[source_id]
+        if not _needs_update(source_id, new_hash, state, force=force):
+            logger.debug("Unchanged %s (hash=%s)", source_id, new_hash[:12])
             result.unchanged.append(source_id)
             continue
 
-        state_version = state.get_transform_version(source_id)
-        if not _version_matches(transform_version, state_version):
-            logger.info(
-                "Re-publishing %s: transform_version %s → %s",
-                source_id, state_version, transform_version,
-            )
+        old_hash = state.get_payload_hash(source_id)
+        logger.info(
+            "Re-publishing %s: hash %s → %s",
+            source_id,
+            (old_hash or "none")[:12], new_hash[:12],
+        )
 
         i14y_id = state.get_i14y_id(source_id)
         if i14y_id is None:
@@ -330,14 +353,18 @@ def _run_update_phase(
             logger.error(
                 "State inconsistency: %s in update set but no i14y_id", source_id
             )
-            result.failed.append((source_id, "missing i14y_id in state"))
+            result.failed.append(
+                FailedRecord(
+                    source_id,
+                    "missing i14y_id in state",
+                    _transformed_title(source_by_id[source_id]),
+                )
+            )
             continue
 
         _sync_update(
             resource, model_class, source_id,
-            i14y_id, record, state,
-            _normalize_modified(record.get("modified")), result,
-            transform_version=transform_version,
+            i14y_id, source_by_id[source_id], new_hash, state, result,
         )
 
 
@@ -361,6 +388,9 @@ class _KindSpec:
 _KINDS: dict[str, _KindSpec] = {
     "dataset": _KindSpec("datasets", DcatDatasetInputModel, _dataset_source_id),
     "concept": _KindSpec("concepts", CodeListConceptInput, _concept_source_id),
+    "dataservice": _KindSpec(
+        "dataservices", DataServiceInputModel, _dataset_source_id
+    ),
 }
 
 
@@ -382,7 +412,6 @@ def sync(
     state_path: Path,
     dry_run: bool = False,
     force: bool = False,
-    transform_version: int | None = None,
 ) -> SyncResult:
     """Sync transformed records to I14Y for the given resource ``kind``."""
     resource, spec = _resource_for(client, kind)
@@ -394,44 +423,7 @@ def sync(
         state_path=state_path,
         dry_run=dry_run,
         force=force,
-        transform_version=transform_version,
     )
-
-
-def _normalize_modified(value: object) -> str | None:
-    """Coerce a modified value (datetime or string) to an ISO-8601 string."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return str(value)
-
-
-def _version_matches(current: int | None, persisted: int | None) -> bool:
-    """Return True iff the persisted transform version is acceptable.
-
-    If the caller doesn't supply a current version, versioning is opt-in
-    and we don't force re-publishes. If the state has no recorded
-    version (older entries), we conservatively treat it as a mismatch.
-    """
-    if current is None:
-        return True
-    return persisted == current
-
-
-def _is_unchanged(source_modified: str | None, state_modified: str | None) -> bool:
-    """Return True iff the source provides no newer modified timestamp.
-
-    If the source lacks a modified date but the state already has one
-    (set to the create-time fallback), there is no change signal and we
-    treat the record as unchanged. If the state lacks a timestamp, we
-    conservatively treat the record as changed.
-    """
-    if state_modified is None:
-        return False
-    if source_modified is None:
-        return True
-    return source_modified <= state_modified
 
 
 def purge_records(
@@ -495,37 +487,22 @@ def _sync_create(
     model_class: type[BaseModel],
     source_id: str,
     record: dict,
+    new_hash: str,
     state: SyncState,
     result: SyncResult,
-    *,
-    transform_version: int | None = None,
 ) -> None:
-    try:
-        model_input, extras = _split_extras(record)
-        model = model_class.model_validate(model_input)
-        i14y_id = resource.create(model)
-        logger.info("Created %s → %s", source_id, i14y_id)
+    def _create(model: BaseModel) -> str:
+        with log_context(source_id=source_id):
+            return str(resource.create(model))
 
-        if extras:
-            _apply_extras_safely(resource, i14y_id, extras, source_id, "Created")
-
-        try:
-            resource.publish_initial(i14y_id)
-        except Exception as exc:
-            logger.warning("Created %s but failed to publish: %s", source_id, exc)
-
-        modified = _normalize_modified(record.get("modified"))
-        if modified is None:
-            modified = datetime.now(timezone.utc).isoformat()
-            logger.debug(
-                "No modified date from source for %s, using current time %s",
-                source_id, modified,
-            )
-        state.add(source_id, str(i14y_id), modified, transform_version=transform_version)
-        result.created.append(source_id)
-    except Exception as exc:
-        logger.error("Failed to create %s: %s", source_id, exc)
-        result.failed.append((source_id, str(exc)))
+    _persist(
+        resource, model_class, source_id, record, new_hash, state, result,
+        verb_past="Created", verb="create",
+        bucket=result.created, persist=_create,
+        post_persist=lambda i14y_id: _publish_initial_safely(
+            resource, i14y_id, source_id,
+        ),
+    )
 
 
 def _sync_update(
@@ -534,24 +511,74 @@ def _sync_update(
     source_id: str,
     i14y_id: str,
     record: dict,
+    new_hash: str,
     state: SyncState,
-    source_modified: str | None,
+    result: SyncResult,
+) -> None:
+    def _update(model: BaseModel) -> str:
+        with log_context(source_id=source_id, i14y_id=i14y_id):
+            resource.update(i14y_id, model)
+        return i14y_id
+
+    _persist(
+        resource, model_class, source_id, record, new_hash, state, result,
+        verb_past="Updated", verb="update",
+        bucket=result.updated, persist=_update,
+    )
+
+
+def _persist(
+    resource: ResourceClient,
+    model_class: type[BaseModel],
+    source_id: str,
+    record: dict,
+    new_hash: str,
+    state: SyncState,
     result: SyncResult,
     *,
-    transform_version: int | None = None,
+    verb_past: str,
+    verb: str,
+    bucket: list[str],
+    persist: Callable[[BaseModel], str],
+    post_persist: Callable[[str], None] | None = None,
 ) -> None:
+    """Shared create/update flow.
+
+    Validates the model, hands it to ``persist`` (which performs the
+    actual API call and returns the I14Y id), applies any extras, runs
+    an optional ``post_persist`` step (used by create to publish), and
+    records the outcome in state + result. Any exception bubbling out
+    of ``persist`` is recorded as a failure for ``source_id``.
+    """
     try:
         model_input, extras = _split_extras(record)
         model = model_class.model_validate(model_input)
-        resource.update(i14y_id, model)
-        logger.info("Updated %s (%s)", source_id, i14y_id)
+        i14y_id = persist(model)
+        logger.info("%s %s (%s)", verb_past, source_id, i14y_id)
         if extras:
-            _apply_extras_safely(resource, i14y_id, extras, source_id, "Updated")
-        state.add(source_id, i14y_id, source_modified, transform_version=transform_version)
-        result.updated.append(source_id)
+            with log_context(source_id=source_id, i14y_id=i14y_id):
+                _apply_extras_safely(
+                    resource, i14y_id, extras, source_id, verb_past,
+                )
+        if post_persist is not None:
+            post_persist(i14y_id)
+        state.add(source_id, i14y_id, new_hash)
+        bucket.append(source_id)
     except Exception as exc:
-        logger.error("Failed to update %s: %s", source_id, exc)
-        result.failed.append((source_id, str(exc)))
+        logger.error("Failed to %s %s: %s", verb, source_id, exc)
+        result.failed.append(
+            FailedRecord(source_id, str(exc), _transformed_title(record))
+        )
+
+
+def _publish_initial_safely(
+    resource: ResourceClient, i14y_id: str, source_id: str,
+) -> None:
+    try:
+        with log_context(source_id=source_id, i14y_id=i14y_id):
+            resource.publish_initial(i14y_id)
+    except Exception as exc:
+        logger.warning("Created %s but failed to publish: %s", source_id, exc)
 
 
 def _sync_delete(
@@ -562,10 +589,11 @@ def _sync_delete(
     result: SyncResult,
 ) -> None:
     try:
-        resource.decommission_and_delete(i14y_id)
+        with log_context(source_id=source_id, i14y_id=i14y_id):
+            resource.decommission_and_delete(i14y_id)
         logger.info("Deleted %s (%s)", source_id, i14y_id)
         state.remove(source_id)
         result.deleted.append(source_id)
     except Exception as exc:
         logger.error("Failed to delete %s: %s", source_id, exc)
-        result.failed.append((source_id, str(exc)))
+        result.failed.append(FailedRecord(source_id, str(exc)))

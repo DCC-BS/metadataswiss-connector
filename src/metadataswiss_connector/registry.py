@@ -17,7 +17,7 @@ from metadataswiss_connector.dcat.transforms import run_transform
 
 # Which I14Y entity a transformed record targets. Drives sync routing
 # (datasets endpoint vs concepts endpoint, identifier shape, state file).
-ResourceKind = Literal["dataset", "concept"]
+ResourceKind = Literal["dataset", "concept", "dataservice"]
 
 
 class TransformFn(Protocol):
@@ -53,10 +53,18 @@ class ResourceSpec:
     Attributes:
         transform: Function mapping a raw record to an I14Y input model.
         kind: Which I14Y entity the model targets — controls sync routing.
+        lookups: Names of *other* raw dlt resources (in the same source)
+                that this resource's transform reads via the ``children``
+                or ``lookups`` argument. Declared explicitly so the
+                Dagster lineage shows these cross-table reads as
+                upstream deps on the transformed asset; runtime behaviour
+                is unaffected (lookups are still discovered dynamically
+                by ``load_sibling_children``).
     """
 
     transform: TransformFn
     kind: ResourceKind = "dataset"
+    lookups: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -71,17 +79,12 @@ class CatalogSource:
         resources: Maps dlt resource name → ResourceSpec (transform + kind).
         publisher: Optional publisher override. If ``None``, the caller's
               global publisher (e.g. from ``I14YConfig``) is used.
-        transform_version: Bumped manually when transform logic changes.
-              Records whose persisted version differs from this are
-              re-published on the next sync, regardless of source
-              modified date.
     """
 
     name: str
     dlt_source_factory: Callable[[], DltSource]
     resources: dict[str, ResourceSpec]
     publisher: str | None = None
-    transform_version: int = 1
 
 
 def run_source(

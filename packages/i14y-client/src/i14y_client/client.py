@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextvars
 import json as _json
 import logging
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import ClassVar, Generic, TypeVar
+from typing import ClassVar, Generic, Iterator, TypeVar
 from uuid import UUID
 
 import httpx
@@ -18,6 +20,11 @@ from i14y_client.models import (
     ConceptInputBase,
     ConceptInputBaseDataWrapper,
     ConceptType,
+    DataServiceInputModel,
+    DataServiceInputModelDataWrapper,
+    DataServiceModel,
+    DataServiceModelCollectionDataWrapper,
+    DataServiceModelDataWrapper,
     DateConceptInput,
     DcatDatasetInputModel,
     DcatDatasetInputModelDataWrapper,
@@ -59,6 +66,61 @@ REGISTRATION_STATUS_RECORDED = "Recorded"
 STATUS_PROPAGATION_DELAY_S = 0.5
 
 
+# Caller-tagged fields (e.g. the upstream source identifier) that the
+# request logger appends to every line, so a failing HTTP call can be
+# traced back to the originating dataspot record without threading the
+# id through every method signature.
+_LOG_CONTEXT: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
+    "i14y_log_context", default={},
+)
+
+
+@contextmanager
+def log_context(**fields: str) -> Iterator[None]:
+    """Tag every I14Y request log emitted inside the block with ``fields``.
+
+    Used by the sync layer to attach the source identifier (e.g. the
+    dataspot UUID) so a failing POST/PUT/DELETE is traceable back to the
+    upstream record from the log line alone.
+    """
+    merged = {**_LOG_CONTEXT.get(), **{k: str(v) for k, v in fields.items() if v is not None}}
+    token = _LOG_CONTEXT.set(merged)
+    try:
+        yield
+    finally:
+        _LOG_CONTEXT.reset(token)
+
+
+def _format_log_context() -> str:
+    ctx = _LOG_CONTEXT.get()
+    if not ctx:
+        return ""
+    return " " + " ".join(f"{k}={v}" for k, v in ctx.items())
+
+
+def _estimate_request_size(*, json: dict | None, files: dict | None) -> int:
+    """Best-effort byte count for the outgoing payload.
+
+    Used purely for telemetry — we don't reserialize precisely the way
+    httpx will, just enough to give an order-of-magnitude. Multipart
+    uploads only count the file part, not the form envelope.
+    """
+    if files is not None:
+        total = 0
+        for value in files.values():
+            # httpx accepts ``(filename, content, content_type)`` tuples
+            # or a bare content value; we use the tuple form everywhere.
+            content = value[1] if isinstance(value, tuple) and len(value) >= 2 else value
+            if isinstance(content, (bytes, bytearray)):
+                total += len(content)
+            elif isinstance(content, str):
+                total += len(content.encode("utf-8"))
+        return total
+    if json is not None:
+        return len(_json.dumps(json).encode("utf-8"))
+    return 0
+
+
 class I14YError(Exception):
     """Raised when the I14Y API returns an error response."""
 
@@ -98,6 +160,12 @@ class I14YClient:
     base_url: str
     auth: I14YAuth
     user_agent: str
+    # Logger is overridable so callers (e.g. a Dagster asset) can pass
+    # their own logger and have request/response telemetry land next to
+    # the materialization in the run log.
+    logger: logging.Logger = field(
+        default_factory=lambda: logging.getLogger("i14y_client")
+    )
     _http: httpx.Client = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -114,6 +182,7 @@ class I14YClient:
         )
         self.datasets = DatasetResource(self)
         self.concepts = ConceptResource(self)
+        self.dataservices = DataServiceResource(self)
 
     def close(self) -> None:
         self._http.close()
@@ -141,13 +210,38 @@ class I14YClient:
             kwargs["json"] = json
         if timeout is not None:
             kwargs["timeout"] = timeout
+
+        req_bytes = _estimate_request_size(json=json, files=files)
+        start = time.perf_counter()
         response = self._http.request(method, path, **kwargs)
+        duration_ms = (time.perf_counter() - start) * 1000.0
+        # I14Y returns the correlation id under one of these headers
+        # depending on the gateway; check both before giving up.
+        request_id = (
+            response.headers.get("x-request-id")
+            or response.headers.get("request-id")
+            or response.headers.get("x-correlation-id")
+        )
+
         if response.status_code >= 400:
             try:
                 detail = response.json()
             except Exception:
                 detail = response.text
+            self.logger.error(
+                "I14Y %s %s -> %d in %.0fms (req=%dB resp=%dB request_id=%s)%s body=%s",
+                method, path, response.status_code, duration_ms,
+                req_bytes, len(response.content), request_id,
+                _format_log_context(), detail,
+            )
             raise I14YError(response.status_code, str(detail), response)
+
+        self.logger.info(
+            "I14Y %s %s -> %d in %.0fms (req=%dB resp=%dB request_id=%s)%s",
+            method, path, response.status_code, duration_ms,
+            req_bytes, len(response.content), request_id,
+            _format_log_context(),
+        )
         return response
 
 
@@ -332,6 +426,16 @@ class DatasetResource(_BaseResource[DcatDatasetInputModel, DcatDatasetModel]):
         """
         self.delete_structure(id_)
         super().decommission_and_delete(id_)
+
+
+class DataServiceResource(_BaseResource[DataServiceInputModel, DataServiceModel]):
+    """Operations on DCAT data services (APIs)."""
+
+    path = "/dataservices"
+    list_filter_param = "dataServiceIdentifier"
+    _input_wrapper = DataServiceInputModelDataWrapper
+    _output_wrapper = DataServiceModelDataWrapper
+    _collection_wrapper = DataServiceModelCollectionDataWrapper
 
 
 class ConceptResource(_BaseResource[ConceptInputBase, IopConceptModel]):

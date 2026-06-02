@@ -8,18 +8,20 @@ from metadataswiss_connector.sources.dataspot.structure import (
     build_dataset_shacl_turtle,
 )
 from metadataswiss_connector.sources.dataspot.constants import (
+    CONCEPT_RESPONSIBLE_DEPUTY_EMAIL,
+    CONCEPT_RESPONSIBLE_PERSON_EMAIL,
+    CONCEPT_VERSION,
     DATASPOT_VALID_FROM_SENTINEL,
     DATASPOT_VALID_TO_SENTINEL,
     DEFAULT_CODE_LIST_VALUE_MAX_LENGTH,
     DEFAULT_CODE_LIST_VALUE_TYPE,
-    EMAIL_RE,
-    FALLBACK_CONTACT_EMAIL,
 )
 from metadataswiss_connector.dcat.i14y_models import (
     CodeInputModel,
     CodeListConceptInput,
     CodeListEntrySortProperty,
     CodeListEntryValueType,
+    DataServiceInputModel,
     DcatDatasetInputModel,
     DcatDistributionInputModel,
     EmailInputModel,
@@ -29,7 +31,7 @@ from metadataswiss_connector.dcat.i14y_models import (
 )
 
 
-def transform_to_dcat(
+def transform_to_dataset(
     record: dict,
     children: dict[str, list],
     *,
@@ -49,9 +51,15 @@ def transform_to_dcat(
                    Configured globally via I14Y_PUBLISHER_IDENTIFIER env var.
     """
     tags = children.get("tags", [])
+    # Sort by the stable distribution id: ``distributions`` is loaded from a
+    # sibling table whose SELECT has no inherent order, so without this the
+    # list order — and thus the payload hash — can vary between runs.
     distributions = [
         _map_distribution(d)
-        for d in children.get("distributions", [])
+        for d in sorted(
+            children.get("distributions", []),
+            key=lambda d: str(d.get("id") or ""),
+        )
         if d.get("access_url")
     ]
     contact_points = _organizational_unit_contact_points(record["id"], lookups)
@@ -92,9 +100,9 @@ def transform_to_dcat(
             record.get("custom_properties__retention_period"),
             record.get("custom_properties__retention_justification"),
         ),
-        landing_pages=dcat.landing_pages(record.get("custom_properties__landing_page")) or None,
-        version=record.get("custom_properties__version"),
-        version_notes=dcat.multi_language(record.get("custom_properties__version_notes")),
+        landing_pages=dcat.landing_pages(record.get("custom_properties__i14y_dataset_landing_page")) or None,
+        version=record.get("custom_properties__i14y_dataset_version"),
+        version_notes=dcat.multi_language(record.get("custom_properties__i14y_dataset_version_notes")),
         distributions=distributions or None,
     )
     if structure_ttl:
@@ -111,12 +119,15 @@ def _resolve_data_owner(
     ancestor's data-owner name from ``collection_data_owners`` (already
     resolved in the source via attribution → post → postAgents label).
     """
+    # collection_id breaks depth ties deterministically: equal-depth
+    # ancestors otherwise fall back to the unordered lookup row order,
+    # which can pick a different owner between runs and flip the hash.
     paths = sorted(
         (
             p for p in lookups.get("dataset_collection_path", [])
             if p.get("dataset_id") == dataset_id
         ),
-        key=lambda p: p.get("depth", 0),
+        key=lambda p: (p.get("depth", 0), str(p.get("collection_id") or "")),
     )
     if not paths:
         return None
@@ -149,7 +160,9 @@ def _organizational_unit_contact_points(
     ]
     if not paths:
         return []
-    paths.sort(key=lambda p: p.get("depth", 0))
+    # See _resolve_data_owner: collection_id breaks depth ties so the
+    # chosen agency is stable across runs.
+    paths.sort(key=lambda p: (p.get("depth", 0), str(p.get("collection_id") or "")))
 
     agencies_by_collection = {
         a.get("collection_id"): a for a in lookups.get("collection_agencies", [])
@@ -185,6 +198,82 @@ def _organizational_unit_contact_points(
     return []
 
 
+def transform_to_dataservice(
+    record: dict,
+    children: dict[str, list],
+    *,
+    lookups: dict[str, list[dict]],
+    publisher: str,
+) -> DataServiceInputModel:
+    """Map a flattened Dataspot API record to a DataServiceInputModel.
+
+    Dataspot exposes APIs as data products with stereotype ``API``. They
+    share most metadata with OGD/GEO datasets but publish to I14Y under
+    ``/dataservices`` with a different input model (no distributions, no
+    SHACL structure). Endpoint metadata comes from dedicated
+    ``i14y_api_*`` custom properties on the dataspot record.
+    """
+    tags = children.get("tags", [])
+    contact_points = _organizational_unit_contact_points(record["id"], lookups)
+    return DataServiceInputModel(
+        title=dcat.multi_language(record.get("label")),
+        description=dcat.multi_language(
+            dcat.html_to_plain_text(record.get("description"))
+        ),
+        identifiers=[record["id"]],
+        publisher=IdentifierInputModel(identifier=publisher),
+        access_rights=_dataservice_access_rights(record),
+        issued=dcat.epoch_ms_to_datetime(
+            record.get("custom_properties__publication_date")
+        ),
+        modified=dcat.epoch_ms_to_datetime(record.get("custom_properties__last_update")),
+        keywords=dcat.keywords(tags),
+        contact_points=contact_points or None,
+        landing_pages=dcat.landing_pages(
+            record.get("custom_properties__i14y_api_landing_page")
+        )
+        or None,
+        endpoint_urls=_dataservice_resource_list(
+            record, children, "custom_properties__i14y_api_endpoint_url"
+        )
+        or None,
+        endpoint_descriptions=_dataservice_resource_list(
+            record, children, "custom_properties__i14y_api_endpoint_description"
+        )
+        or None,
+    )
+
+
+def _dataservice_access_rights(record: dict) -> CodeInputModel:
+    """Map ``custom_properties__i14y_api_access_rights`` to an I14Y code.
+
+    The source carries the value as a URL whose final path segment is the
+    I14Y code (e.g. ``.../PUBLIC`` → ``PUBLIC``).
+    """
+    raw = str(record.get("custom_properties__i14y_api_access_rights") or "").rstrip("/")
+    code = raw.rsplit("/", 1)[-1]
+    return CodeInputModel(code=code)
+
+
+def _dataservice_resource_list(
+    record: dict, children: dict[str, list], field: str
+) -> list[ResourceModel]:
+    """Build a list of ResourceModel URIs from a custom-property field.
+
+    dlt flattens scalar custom properties to a column on the parent record
+    and list-valued ones to a child table; we accept either shape so the
+    transform doesn't need to know which form dataspot returns for these
+    endpoint fields.
+    """
+    child_values = children.get(field, [])
+    if child_values:
+        return [ResourceModel(uri=str(v)) for v in child_values if v]
+    scalar = record.get(field)
+    if scalar:
+        return [ResourceModel(uri=str(scalar))]
+    return []
+
+
 def transform_to_concept(
     record: dict,
     children: dict[str, list],
@@ -200,7 +289,6 @@ def transform_to_concept(
     ``POST /concepts/{id}/codelist-entries/imports/Json`` once the
     concept's I14Y UUID is known.
     """
-    contact = _resolve_concept_contact(record)
     # Enumerations expose no customProperties — ``date_created`` is the
     # only timestamp available in the source payload.
     valid_from = (
@@ -216,10 +304,10 @@ def transform_to_concept(
             or dcat.multi_language(record.get("label"))
         ),
         publisher=IdentifierInputModel(identifier=publisher),
-        responsible_person=EmailInputModel(email=contact),
-        responsible_deputy=EmailInputModel(email=contact),
+        responsible_person=EmailInputModel(email=CONCEPT_RESPONSIBLE_PERSON_EMAIL),
+        responsible_deputy=EmailInputModel(email=CONCEPT_RESPONSIBLE_DEPUTY_EMAIL),
         valid_from=valid_from,
-        version="1.0.0",
+        version=CONCEPT_VERSION,
         code_list_entry_value_type=_value_type_from_entries(raw_entries),
         code_list_entry_value_max_length=_max_code_length(raw_entries),
         code_list_entry_default_sort_property=CodeListEntrySortProperty.code,
@@ -300,19 +388,6 @@ def _max_code_length(entries: list[dict]) -> int:
         return DEFAULT_CODE_LIST_VALUE_MAX_LENGTH
     longest = max((len(str(e.get("code") or "")) for e in entries), default=0)
     return max(longest, 1)
-
-
-def _resolve_concept_contact(record: dict) -> str:
-    """Pick an email for responsiblePerson/Deputy on a code-list concept.
-
-    Dataspot's ``created_by`` is typically an email; if it isn't, we
-    fall back to a constant so the concept still validates. The user
-    can refine this once the source surfaces a stable contact field.
-    """
-    candidate = (record.get("created_by") or "").strip()
-    if candidate and EMAIL_RE.match(candidate):
-        return candidate
-    return FALLBACK_CONTACT_EMAIL
 
 
 def _map_distribution(raw: dict) -> DcatDistributionInputModel:

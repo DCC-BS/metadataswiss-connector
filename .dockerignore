@@ -1,0 +1,24 @@
+# Keep the build context small and never leak local state/secrets.
+.git
+.venv
+.dagster_home
+.tmp_dagster_home_*
+.pytest_cache
+__pycache__
+*.pyc
+
+# Local runtime artefacts — must NOT be baked into the image. These are
+# environment-specific (the I14Y UUID state files belong to whatever
+# environment they were produced against) and live on volumes in prod.
+data/
+*.duckdb
+*.duckdb.wal
+
+# Secrets — provided at runtime via env_file / compose, never in the image.
+.env
+.envrc
+
+docs/
+scripts/
+*.md
+!README.md

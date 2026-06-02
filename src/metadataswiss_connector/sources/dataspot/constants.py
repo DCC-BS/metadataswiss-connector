@@ -1,6 +1,6 @@
 """Dataspot-specific constant values used across the source extraction."""
 
-import re
+import os
 
 from metadataswiss_connector.dcat.i14y_models import CodeListEntryValueType
 
@@ -13,29 +13,37 @@ PUBLIC_STATE = "PUBLIC"
 # resolve via the staatskalender API).
 STEREOTYPE_ORGANIZATIONAL_UNIT = "organizationalUnit"
 
+# Stereotypes set on data products in Dataspot. OGD / GEO records are
+# published to I14Y as Datasets; API records become DataServices on a
+# different endpoint with a different input model.
+STEREOTYPE_DATA_PRODUCT_OGD = "OGD"
+STEREOTYPE_DATA_PRODUCT_GEO = "GEO"
+STEREOTYPE_DATA_PRODUCT_API = "API"
+DATASET_STEREOTYPES = frozenset(
+    {STEREOTYPE_DATA_PRODUCT_OGD, STEREOTYPE_DATA_PRODUCT_GEO}
+)
+DATA_SERVICE_STEREOTYPES = frozenset({STEREOTYPE_DATA_PRODUCT_API})
+
 # Role UUID identifying the "data owner" attribution in Dataspot.
 # The collection's ``attributedTo`` endpoint returns Attribution
 # objects whose ``attributedTo`` value points to a Post (a role
 # binding), not directly to a Person. The Post's ``postAgents`` link
 # resolves to the Person(s) currently holding that post.
-DATA_OWNER_ROLE_UUID = "02222f05-5690-4cb8-8d90-c27ca57e98e9"
+# Tenant-specific, so required from the environment.
+DATA_OWNER_ROLE_UUID = os.environ["DATA_OWNER_ROLE_UUID"]
 
 # Staatskalender (kanton BS) public API used to enrich organizational
 # units (collection stereotype ``organizationalUnit``) with contact data.
-STAATSKALENDER_BASE_URL = "https://staatskalender.bs.ch/api"
+# Required from the environment so other cantons can point at their own
+# directory.
+STAATSKALENDER_BASE_URL = os.environ["STAATSKALENDER_BASE_URL"].rstrip("/")
 # Fallback wait when the staatskalender 429 response carries no
 # x-ratelimit-reset header. The API resets quotas on a 6-minute window.
 STAATSKALENDER_DEFAULT_WAIT_SECONDS = 360.0
 # Hard cap for any computed wait so a malformed reset header can't
 # stall the pipeline indefinitely.
 STAATSKALENDER_MAX_WAIT_SECONDS = 900.0
-STAATSKALENDER_MAX_RETRIES = 3
-
-# Bump when the mapping logic in transform.py changes in a way that
-# should force a re-publish of every record, even if the source
-# ``modified`` timestamp hasn't moved. Sync compares this against the
-# value persisted in the per-source state file.
-TRANSFORM_VERSION = 1
+STAATSKALENDER_MAX_RETRIES = 5
 
 # Sentinel epoch-ms values Dataspot uses for "no bound" on validity:
 # 1900-01-01 and 3000-01-01 UTC. Skip these when mapping to I14Y so we
@@ -43,11 +51,15 @@ TRANSFORM_VERSION = 1
 DATASPOT_VALID_FROM_SENTINEL = -2208988800000  # 1900-01-01 UTC
 DATASPOT_VALID_TO_SENTINEL = 32503593600000    # 3000-01-01 UTC
 
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Fixed contacts used for responsiblePerson / responsibleDeputy on every
+# code-list concept. Dataspot enumerations expose no stable contact field,
+# so we publish deployment-wide constants rather than deriving them per
+# record. Required from the environment.
+CONCEPT_RESPONSIBLE_PERSON_EMAIL = os.environ["CONCEPT_RESPONSIBLE_PERSON_EMAIL"]
+CONCEPT_RESPONSIBLE_DEPUTY_EMAIL = os.environ["CONCEPT_RESPONSIBLE_DEPUTY_EMAIL"]
 
-# Fallback contact when a Dataspot enumeration carries no email-shaped
-# created_by. Required by the I14Y CodeListConceptInput model.
-FALLBACK_CONTACT_EMAIL = "noreply@bs.ch"
+# Version string used for every code-list concept.
+CONCEPT_VERSION = "1.0.0"
 
 # Default code-list value-type / max-length used when Dataspot doesn't
 # expose them via custom properties on the enumeration. I14Y requires
@@ -59,7 +71,9 @@ DEFAULT_CODE_LIST_VALUE_MAX_LENGTH = 255
 # SHACL structure documents we upload to I14Y. The URIs don't need to
 # resolve — SHACL only requires globally unique IRIs — but anchoring them
 # at the public catalog domain gives provenance and avoids urn churn.
-DATASPOT_IRI_BASE = "https://datenkatalog.bs.ch"
+# Required from the environment so each deployment anchors at its own
+# catalog domain.
+SOURCES__DATASPOT__BASE_URL = os.environ["SOURCES__DATASPOT__BASE_URL"].rstrip("/")
 
 # Dataspot ``baseType`` → XML Schema datatype IRI. Unknown / missing
 # base types fall back to ``xsd:string`` (handled in the SHACL builder).

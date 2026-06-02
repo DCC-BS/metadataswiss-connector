@@ -14,17 +14,16 @@ Die Pipeline folgt einem ELT-Pattern mit drei Schritten, jeweils basierend auf [
 Quellkatalog → [extract] → [transform] → [publish] → I14Y API
 ```
 
-Aktuell gibt es keinen Orchestrator — Schritte werden über die mitgelieferte CLI ausgeführt. Eine Anbindung an Airflow/Dagster/o.ä. ist später möglich, da `registry.py`, `config.py`, `sources/` und `dcat/` framework-frei bleiben.
+Die Schritte können sowohl über die mitgelieferte CLI als auch über [Dagster](https://dagster.io/) ausgeführt werden (siehe Abschnitt [Dagster](#dagster) weiter unten). `registry.py`, `config.py`, `sources/` und `dcat/` bleiben framework-frei — weitere Orchestratoren (Airflow o.ä.) sind dadurch problemlos anbindbar.
 
 ### Plugin-Architektur
 
-Katalogquellen werden als framework-freie `CatalogSource`-Descriptoren registriert. Die CLI iteriert über die Liste in `sources/__init__.py` und führt pro Source die gewünschten Schritte aus.
+Katalogquellen werden als framework-freie `CatalogSource`-Descriptoren registriert. Dagster iteriert über die Liste in `sources/__init__.py` und materialisiert pro Source die gewünschten Assets.
 
 ### Projektstruktur
 
 ```
 src/metadataswiss_connector/
-├── __main__.py                    # CLI-Entrypoint (list, run, purge)
 ├── registry.py                    # CatalogSource, ResourceSpec, TransformFn
 ├── config.py                      # I14YConfig
 ├── resources.py                   # dlt-Pipeline-Helper + I14Y-Client-Factory
@@ -41,6 +40,12 @@ src/metadataswiss_connector/
 │       ├── enrichment.py          # Staatskalender-Lookup, Data-Owner-Resolver
 │       ├── structure.py           # SHACL-Turtle-Generator für Dataset-Struktur
 │       └── constants.py           # Konstanten + TRANSFORM_VERSION
+├── pipeline.py                   # Framework-freie extract/transform/publish-Helper
+├── dagster_defs/                 # Dagster-Entrypoint (Assets + Jobs pro Source)
+│   ├── __init__.py               #   exportiert `defs: Definitions`
+│   ├── assets.py                 #   Asset-Factory pro CatalogSource
+│   ├── email_alerts.py           #   Run-Failure-Sensor (Email)
+│   └── purge_jobs.py             #   Purge-Job-Factory pro CatalogSource
 └── dcat/
     ├── builders.py                # I14Y DCAT-Modell-Builder
     ├── transforms.py              # Raw→DCAT Transform-Pipeline-Schritt
@@ -82,58 +87,92 @@ uv sync
 
 ### Konfiguration
 
-Nicht-geheime Einstellungen in `.dlt/config.toml`:
+Sämtliche Konfiguration läuft über `.env` (siehe `.env.example` als Vorlage).
+`.env` wird beim Import des Pakets automatisch geladen.
 
-```toml
-[sources.dataspot]
-base_url = "https://datenkatalog.bs.ch"
-database_name = "prod"
-```
+Dataspot-Verbindung. dlt löst diese Werte über das `SOURCES__DATASPOT__*`
+Env-Naming auf (doppelter Unterstrich pro TOML-Ebene):
 
-Secrets in `.dlt/secrets.toml` (nicht committen!):
-
-```toml
-[sources.dataspot]
-tenant_id = ""
-client_id = ""
-client_secret = ""
-dataspot_access_key = ""
-exposed_client_id = ""
+```bash
+SOURCES__DATASPOT__BASE_URL=https://datenkatalog.bs.ch
+SOURCES__DATASPOT__DATABASE_NAME=prod
+# Secrets — nie committen:
+SOURCES__DATASPOT__TENANT_ID=
+SOURCES__DATASPOT__CLIENT_ID=
+SOURCES__DATASPOT__CLIENT_SECRET=
+SOURCES__DATASPOT__DATASPOT_ACCESS_KEY=
+SOURCES__DATASPOT__EXPOSED_CLIENT_ID=
 ```
 
 ## Pipeline starten
 
+Die Pipeline wird über Dagster orchestriert. Pro registrierter Quelle und Resource werden Assets generiert (`<source>_raw → <source>_<resource>_transformed → <source>_<resource>_published`), so dass sich einzelne Schritte gezielt re-materialisieren lassen und die Lineage in der UI sichtbar ist.
+
 ```bash
-# alle registrierten Quellen anzeigen
-uv run metadataswiss-connector list
-
-# eine Quelle end-to-end ausführen (Default: max. 5 Records pro Resource publishen)
-uv run metadataswiss-connector run dataspot
-
-# Publish-Limit anheben (0 = kein Limit)
-uv run metadataswiss-connector run dataspot --limit 0
-
-# nur einzelne Schritte
-uv run metadataswiss-connector run dataspot --steps extract,transform
-
-# alle Quellen
-uv run metadataswiss-connector run --all
+# Dagster-UI starten (Default: http://localhost:3000)
+uv run dagster dev
 ```
+
+Das Modul `metadataswiss_connector.dagster_defs` wird über `[tool.dagster]` in `pyproject.toml` automatisch von `dagster dev` geladen. Ein `full_sync_schedule` (täglich 03:00, Zeitzone `Europe/Zurich`, konfigurierbar über `CONNECTOR_SYNC_CRON` / `CONNECTOR_SYNC_TIMEZONE`) ist registriert, startet aber **gestoppt** — er muss in der Dagster-UI unter *Automation* bewusst aktiviert werden.
+
+## Deployment (Docker Compose)
+
+Für den Produktivbetrieb liegt ein Compose-Setup mit vier Services bei: `postgres` (Dagster-Storage), `connector_code` (gRPC-Code-Server — **hier laufen alle Runs**, deshalb hängt das persistente Daten-Volume an diesem Container), `webserver` (UI auf Port 3000) und `daemon` (Schedules, Run-Queue, Sensoren).
+
+```bash
+# 1. .env mit den PRODUKTIV-Credentials befüllen (siehe .env.example)
+cp .env.example .env && $EDITOR .env
+
+# 2. Bauen und starten
+docker compose up -d --build
+
+# 3. UI öffnen
+open http://localhost:3000
+```
+
+Persistenz:
+- **Dagster-Metadaten** liegen im benannten Volume `postgres_data`.
+- **Connector-State** (DuckDB-Warehouse + I14Y-State-Files) liegt per **Bind Mount** auf dem Host — der Container nutzt damit dieselben Dateien wie ein lokales `dagster dev`. Die Host-Pfade sind über `.env` konfigurierbar:
+  - `HOST_STATE_DIR` (Default `./data`) → im Container `/mnt/state` (`CONNECTOR_DATA_DIR`)
+  - `HOST_DUCKDB_DIR` (Default `.`, Repo-Root) + `DUCKDB_FILENAME` (Default `metadata.duckdb`) → im Container `/mnt/duckdb/<file>` (`DUCKDB_PATH`)
+
+Die App-Secrets kommen aus `.env`; Postgres-Credentials lassen sich über `DAGSTER_PG_*` überschreiben.
+
+> **Umgebungswechsel (Abnahme → Prod):** Die State-Files mappen Source-IDs auf I14Y-UUIDs einer *bestimmten* Umgebung. Beim Wechsel `HOST_STATE_DIR` (und ggf. `HOST_DUCKDB_DIR`) auf ein **leeres, prod-eigenes** Verzeichnis zeigen lassen — niemals die Abnahme-State-Files wiederverwenden, sonst versucht der Sync, in Prod nicht existierende UUIDs zu aktualisieren/löschen.
+
+Nach dem ersten Start: Sensoren (`email_on_run_failure`, `email_on_invalid_records`) und ggf. `full_sync_schedule` in der UI aktivieren. Für den ersten Prod-Lauf empfiehlt sich ein manueller Materialize des `*_published`-Assets statt direkt den Schedule scharf zu schalten.
+
+#### Email-Alerts bei Run-Failures
+
+Ein `run_failure_sensor` (`email_on_run_failure` in `dagster_defs/email_alerts.py`) verschickt bei jedem fehlgeschlagenen Dagster-Run eine Email an die in `EMAIL_TO` hinterlegten Empfänger. Der Body enthält Run-ID, Job-Name und Fehlertext; das vollständige Event-Log wird als `run_<id>.log` angehängt.
+
+SMTP-Konfiguration via `.env` (siehe `.env.example`):
+
+```
+SMTP_HOST=smtp.example.ch
+SMTP_PORT=587
+SMTP_USER=alerts@example.ch
+SMTP_PASSWORD=...
+SMTP_USE_TLS=true
+SMTP_FROM=alerts@example.ch
+EMAIL_TO=ops@example.ch,team@example.ch
+```
+
+Fehlen `SMTP_HOST`, `SMTP_FROM` oder `EMAIL_TO`, wird der Sensor still übersprungen — der Sensor muss in der Dagster-UI unter *Sensors* aktiviert werden, damit er feuert.
 
 ### Purge
 
-Alle aktiven Records einer Source aus I14Y entfernen (Soft-Delete im State-File):
+Alle aktiven Records einer Source aus I14Y entfernen (Soft-Delete im State-File). Pro registrierter Source existiert ein Dagster-Job `<source>_purge` (z.B. `dataspot_purge`), der über die Dagster-UI unter *Jobs* gestartet wird. Default-Config ist Dry-Run; für eine echte Löschung im Launchpad:
 
-```bash
-# Dry-Run: zeigt nur, was gelöscht würde
-uv run metadataswiss-connector purge dataspot --dry-run
-
-# echte Löschung (interaktive Bestätigung erforderlich)
-uv run metadataswiss-connector purge dataspot
-
-# ohne Rückfrage (z.B. für Skripte)
-uv run metadataswiss-connector purge dataspot --yes
+```yaml
+ops:
+  dataspot_purge_op:
+    config:
+      dry_run: false
+      confirm: DELETE
 ```
+
+Ohne `confirm: DELETE` bei `dry_run: false` schlägt der Run absichtlich fehl. Resultate (`deleted`, `failed`, `per_resource`) erscheinen als Op-Metadata im Run-Log.
 
 ### Ergebnisse
 
@@ -162,7 +201,7 @@ uv run datamodel-codegen \
   --allow-population-by-field-name
 ```
 
-Das File ist generiert — nicht von Hand bearbeiten. Kontrakt-Verstöße in `builders.py` oder `transform_to_dcat` werden nach der Regeneration vom Type-Checker bzw. zur Laufzeit von Pydantic gemeldet.
+Das File ist generiert — nicht von Hand bearbeiten. Kontrakt-Verstöße in `builders.py` oder `transform_to_dataset` werden nach der Regeneration vom Type-Checker bzw. zur Laufzeit von Pydantic gemeldet.
 
 ## Lizenz
 

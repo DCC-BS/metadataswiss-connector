@@ -7,6 +7,8 @@ logger = logging.getLogger(__name__)
 
 from metadataswiss_connector.sources.dataspot.auth import DataspotAuth
 from metadataswiss_connector.sources.dataspot.constants import (
+    DATA_SERVICE_STEREOTYPES,
+    DATASET_STEREOTYPES,
     PUBLIC_STATE,
     STEREOTYPE_ORGANIZATIONAL_UNIT,
 )
@@ -75,8 +77,8 @@ def dataspot_source(
     """dlt source for the Dataspot metadata catalog REST API.
 
     Any argument left as ``None`` is resolved from dlt's config/secrets
-    system (``.dlt/config.toml``, ``.dlt/secrets.toml``, or env vars under
-    ``sources.dataspot.*``). Explicit arguments take precedence.
+    system via env vars under the ``SOURCES__DATASPOT__*`` naming (loaded
+    from ``.env``; see ``.env.example``). Explicit arguments take precedence.
     """
     base_url = base_url or dlt.config["sources.dataspot.base_url"]
     database_name = database_name or dlt.config["sources.dataspot.database_name"]
@@ -104,8 +106,14 @@ def dataspot_source(
         "client": {"base_url": api_base_url, "auth": auth},
         "resource_defaults": {"primary_key": "id", "write_disposition": "merge"},
         "resources": [
+            # Broad fetch over every public data product regardless of
+            # stereotype. Downstream filter transformers split this into
+            # ``data_products`` (OGD/GEO → I14Y Dataset) and
+            # ``data_services`` (API → I14Y DataService). Ancestry walks
+            # also consume this broad stream so contact points / data
+            # owners get resolved for API records too.
             _public_resource(
-                "data_products",
+                "data_products_all",
                 "schemes/Datenprodukte/datasets",
                 "_embedded.datasets",
             ),
@@ -123,14 +131,14 @@ def dataspot_source(
             ),
             _public_resource(
                 "distributions",
-                "datasets/{resources.data_products.id}/distributions",
+                "datasets/{resources.data_products_all.id}/distributions",
                 "_embedded.distributions",
                 parent=True,
                 ignore_404=True,
             ),
             _public_resource(
                 "compositions",
-                "datasets/{resources.data_products.id}/compositions",
+                "datasets/{resources.data_products_all.id}/compositions",
                 "_embedded.compositions",
                 parent=True,
                 ignore_404=True,
@@ -142,7 +150,7 @@ def dataspot_source(
     }
 
     resources = list(rest_api_resources(config))
-    data_products = next(r for r in resources if r.name == "data_products")
+    data_products_all = next(r for r in resources if r.name == "data_products_all")
     compositions = next(r for r in resources if r.name == "compositions")
 
     enrichment = DataspotEnrichment(
@@ -156,7 +164,31 @@ def dataspot_source(
                 yield item, depth, href, collection
 
     @dlt.transformer(
-        data_from=data_products,
+        data_from=data_products_all,
+        name="data_products",
+        primary_key="id",
+        write_disposition="merge",
+    )
+    def data_products(items):
+        """Pass through OGD/GEO data products (published as I14Y Datasets)."""
+        for item in _as_list(items):
+            if item.get("stereotype") in DATASET_STEREOTYPES:
+                yield item
+
+    @dlt.transformer(
+        data_from=data_products_all,
+        name="data_services",
+        primary_key="id",
+        write_disposition="merge",
+    )
+    def data_services(items):
+        """Pass through API data products (published as I14Y DataServices)."""
+        for item in _as_list(items):
+            if item.get("stereotype") in DATA_SERVICE_STEREOTYPES:
+                yield item
+
+    @dlt.transformer(
+        data_from=data_products_all,
         name="collections",
         primary_key="id",
         write_disposition="merge",
@@ -170,7 +202,7 @@ def dataspot_source(
             yield collection
 
     @dlt.transformer(
-        data_from=data_products,
+        data_from=data_products_all,
         name="dataset_collection_path",
         primary_key=["dataset_id", "depth"],
         write_disposition="merge",
@@ -214,13 +246,13 @@ def dataspot_source(
             }
 
     @dlt.transformer(
-        data_from=data_products,
+        data_from=data_products_all,
         name="collection_data_owners",
         primary_key="collection_id",
         write_disposition="merge",
     )
     def collection_data_owners(items):
-        # Walks ancestors directly from data_products rather than from
+        # Walks ancestors directly from data_products_all rather than from
         # ``collections``: dlt pipes are single-consumer, and
         # ``collection_agencies`` already drains that one.
         emitted: set[str] = set()
@@ -238,26 +270,6 @@ def dataspot_source(
             if not name:
                 continue
             yield {"collection_id": collection_id, "name": name}
-
-    @dlt.transformer(
-        data_from=compositions,
-        name="attributes",
-        primary_key="id",
-        write_disposition="merge",
-    )
-    def attributes(items):
-        emitted: set[str] = set()
-        for composition in _as_list(items):
-            href = (
-                composition.get("_links", {}).get("composedOf", {}).get("href")
-            )
-            if not href or href in emitted:
-                continue
-            emitted.add(href)
-            attribute = enrichment.fetch_attribute(href)
-            if not _is_public(attribute):
-                continue
-            yield attribute
 
     @dlt.transformer(
         data_from=compositions,
@@ -323,10 +335,11 @@ def dataspot_source(
 
     return [
         *resources,
+        data_products,
+        data_services,
         collections,
         dataset_collection_path,
         collection_agencies,
         collection_data_owners,
-        attributes,
         dataset_structure_components,
     ]

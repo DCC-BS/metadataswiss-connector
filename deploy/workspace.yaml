@@ -1,0 +1,9 @@
+# The webserver and daemon load the connector's code from the dedicated
+# `connector_code` gRPC server (hostname = the compose service name), rather
+# than importing it in-process. That isolates user code from the platform
+# containers and means runs execute where the data volume is mounted.
+load_from:
+  - grpc_server:
+      host: connector_code
+      port: 4000
+      location_name: metadataswiss_connector
