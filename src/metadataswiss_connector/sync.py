@@ -161,7 +161,7 @@ class SyncState:
         entry = self._data.get(source_id)
         if not entry or entry.get("deleted_at"):
             return None
-        return entry["id"]
+        return entry.get("id")
 
     def get_payload_hash(self, source_id: str) -> str | None:
         entry = self._data.get(source_id)
@@ -206,6 +206,25 @@ class SyncState:
         return {sid for sid, entry in self._data.items() if not entry.get("deleted_at")}
 
 
+def active_id_map(state_path: Path) -> dict[str, str]:
+    """Source identifier → I14Y id for every record currently active on I14Y.
+
+    Reads the given per-resource state file; soft-deleted entries and
+    entries without an I14Y id (never successfully created) are excluded.
+    Empty when the state file doesn't exist yet (nothing published).
+    Owned by this module so no other layer needs to know the state-file
+    format.
+    """
+    if not state_path.exists():
+        return {}
+    state = SyncState(state_path)
+    return {
+        source_id: i14y_id
+        for source_id in sorted(state.all_source_ids())
+        if (i14y_id := state.get_i14y_id(source_id))
+    }
+
+
 def sync_records(
     resource: ResourceClient,
     source_records: list[dict],
@@ -246,23 +265,23 @@ def sync_records(
             to_create, to_check, to_delete, hash_by_id, state, force=force,
         )
 
-    result = SyncResult()
+    run = _SyncRun(resource=resource, state=state, model_class=model_class)
     # try/finally guarantees state is persisted even on unexpected errors,
     # so successfully-created I14Y records aren't orphaned by a crash.
     try:
-        _run_create_phase(
-            resource, model_class, sorted(to_create), source_by_id,
-            hash_by_id, state, result,
-        )
-        _run_update_phase(
-            resource, model_class, sorted(to_check), source_by_id,
-            hash_by_id, state, result, force=force,
-        )
-        _run_delete_phase(resource, sorted(to_delete), state, result)
+        for source_id in sorted(to_create):
+            run.create(source_id, source_by_id[source_id], hash_by_id[source_id])
+        for source_id in sorted(to_check):
+            run.update_if_changed(
+                source_id, source_by_id[source_id], hash_by_id[source_id],
+                force=force,
+            )
+        for source_id in sorted(to_delete):
+            run.delete(source_id)
     finally:
         state.save()
 
-    return result
+    return run.result
 
 
 def _build_source_index(
@@ -313,39 +332,51 @@ def _dry_run_result(
     return result
 
 
-def _run_create_phase(
-    resource: ResourceClient, model_class: type[BaseModel],
-    source_ids: list[str], source_by_id: dict[str, dict],
-    hash_by_id: dict[str, str], state: SyncState, result: SyncResult,
-) -> None:
-    for source_id in source_ids:
-        _sync_create(
-            resource, model_class, source_id, source_by_id[source_id],
-            hash_by_id[source_id], state, result,
+@dataclass
+class _SyncRun:
+    """One sync/purge execution against a single I14Y resource.
+
+    Bundles the per-run plumbing (resource client, persisted state,
+    result buckets) that every create/update/delete step shares, so the
+    step methods only take per-record arguments. ``model_class`` may be
+    ``None`` for delete-only runs (purge).
+    """
+
+    resource: ResourceClient
+    state: SyncState
+    model_class: type[BaseModel] | None = None
+    result: SyncResult = field(default_factory=SyncResult)
+
+    def create(self, source_id: str, record: dict, new_hash: str) -> None:
+        def _create(model: BaseModel) -> str:
+            with log_context(source_id=source_id):
+                return str(self.resource.create(model))
+
+        self._persist(
+            source_id, record, new_hash,
+            verb_past="Created", verb="create",
+            bucket=self.result.created, persist=_create,
+            post_persist=lambda i14y_id: self._publish_initial_safely(
+                i14y_id, source_id,
+            ),
         )
 
-
-def _run_update_phase(
-    resource: ResourceClient, model_class: type[BaseModel],
-    source_ids: list[str], source_by_id: dict[str, dict],
-    hash_by_id: dict[str, str], state: SyncState, result: SyncResult,
-    *, force: bool,
-) -> None:
-    for source_id in source_ids:
-        new_hash = hash_by_id[source_id]
-        if not _needs_update(source_id, new_hash, state, force=force):
+    def update_if_changed(
+        self, source_id: str, record: dict, new_hash: str, *, force: bool,
+    ) -> None:
+        if not _needs_update(source_id, new_hash, self.state, force=force):
             logger.debug("Unchanged %s (hash=%s)", source_id, new_hash[:12])
-            result.unchanged.append(source_id)
-            continue
+            self.result.unchanged.append(source_id)
+            return
 
-        old_hash = state.get_payload_hash(source_id)
+        old_hash = self.state.get_payload_hash(source_id)
         logger.info(
             "Re-publishing %s: hash %s → %s",
             source_id,
             (old_hash or "none")[:12], new_hash[:12],
         )
 
-        i14y_id = state.get_i14y_id(source_id)
+        i14y_id = self.state.get_i14y_id(source_id)
         if i14y_id is None:
             # Should be impossible: _compute_diff put this id in
             # ``to_check`` because state knew about it. Treat as a soft
@@ -353,27 +384,90 @@ def _run_update_phase(
             logger.error(
                 "State inconsistency: %s in update set but no i14y_id", source_id
             )
-            result.failed.append(
+            self.result.failed.append(
                 FailedRecord(
                     source_id,
                     "missing i14y_id in state",
-                    _transformed_title(source_by_id[source_id]),
+                    _transformed_title(record),
                 )
             )
-            continue
+            return
 
-        _sync_update(
-            resource, model_class, source_id,
-            i14y_id, source_by_id[source_id], new_hash, state, result,
+        def _update(model: BaseModel) -> str:
+            with log_context(source_id=source_id, i14y_id=i14y_id):
+                self.resource.update(i14y_id, model)
+            return i14y_id
+
+        self._persist(
+            source_id, record, new_hash,
+            verb_past="Updated", verb="update",
+            bucket=self.result.updated, persist=_update,
         )
 
+    def delete(self, source_id: str) -> None:
+        i14y_id = self.state.get_i14y_id(source_id)
+        try:
+            with log_context(source_id=source_id, i14y_id=i14y_id):
+                self.resource.decommission_and_delete(i14y_id)
+            logger.info("Deleted %s (%s)", source_id, i14y_id)
+            self.state.remove(source_id)
+            self.result.deleted.append(source_id)
+        except Exception as exc:
+            logger.error("Failed to delete %s: %s", source_id, exc)
+            self.result.failed.append(FailedRecord(source_id, str(exc)))
 
-def _run_delete_phase(
-    resource: ResourceClient, source_ids: list[str],
-    state: SyncState, result: SyncResult,
-) -> None:
-    for source_id in source_ids:
-        _sync_delete(resource, source_id, state.get_i14y_id(source_id), state, result)
+    def _persist(
+        self,
+        source_id: str,
+        record: dict,
+        new_hash: str,
+        *,
+        verb_past: str,
+        verb: str,
+        bucket: list[str],
+        persist: Callable[[BaseModel], str],
+        post_persist: Callable[[str], None] | None = None,
+    ) -> None:
+        """Shared create/update flow.
+
+        Validates the model, hands it to ``persist`` (which performs the
+        actual API call and returns the I14Y id), applies any extras, runs
+        an optional ``post_persist`` step (used by create to publish), and
+        records the outcome in state + result. Any exception bubbling out
+        of ``persist`` is recorded as a failure for ``source_id``.
+        """
+        try:
+            model_input, extras = _split_extras(record)
+            model = self.model_class.model_validate(model_input)
+            i14y_id = persist(model)
+            logger.info("%s %s (%s)", verb_past, source_id, i14y_id)
+            if extras:
+                with log_context(source_id=source_id, i14y_id=i14y_id):
+                    self._apply_extras_safely(i14y_id, extras, source_id, verb_past)
+            if post_persist is not None:
+                post_persist(i14y_id)
+            self.state.add(source_id, i14y_id, new_hash)
+            bucket.append(source_id)
+        except Exception as exc:
+            logger.error("Failed to %s %s: %s", verb, source_id, exc)
+            self.result.failed.append(
+                FailedRecord(source_id, str(exc), _transformed_title(record))
+            )
+
+    def _apply_extras_safely(
+        self, i14y_id: UUID | str, extras: dict, source_id: str, verb: str,
+    ) -> None:
+        try:
+            self.resource.apply_extras(i14y_id, extras)
+        except Exception as exc:
+            logger.warning("%s %s but failed to apply extras: %s", verb, source_id, exc)
+
+    def _publish_initial_safely(self, i14y_id: str, source_id: str) -> None:
+        try:
+            with log_context(source_id=source_id, i14y_id=i14y_id):
+                self.resource.publish_initial(i14y_id)
+        except Exception as exc:
+            logger.warning("Created %s but failed to publish: %s", source_id, exc)
 
 
 @dataclass(frozen=True)
@@ -438,21 +532,23 @@ def purge_records(
     skipped (already considered gone on I14Y per our records).
     On success, entries are soft-deleted in the state file.
     """
-    result = SyncResult()
     state = SyncState(state_path)
     source_ids = sorted(state.all_source_ids())
 
     logger.warning("PURGE: %d active records will be deleted from I14Y", len(source_ids))
 
     if dry_run:
+        result = SyncResult()
         result.deleted = source_ids
         return result
 
+    run = _SyncRun(resource=resource, state=state)
     try:
-        _run_delete_phase(resource, source_ids, state, result)
+        for source_id in source_ids:
+            run.delete(source_id)
     finally:
         state.save()
-    return result
+    return run.result
 
 
 def purge(
@@ -471,129 +567,3 @@ def _split_extras(record: dict) -> tuple[dict, dict | None]:
     extras = record.get(EXTRAS_KEY)
     model_input = {k: v for k, v in record.items() if k != EXTRAS_KEY}
     return model_input, extras
-
-
-def _apply_extras_safely(
-    resource: ResourceClient, i14y_id: UUID | str, extras: dict, source_id: str, verb: str,
-) -> None:
-    try:
-        resource.apply_extras(i14y_id, extras)
-    except Exception as exc:
-        logger.warning("%s %s but failed to apply extras: %s", verb, source_id, exc)
-
-
-def _sync_create(
-    resource: ResourceClient,
-    model_class: type[BaseModel],
-    source_id: str,
-    record: dict,
-    new_hash: str,
-    state: SyncState,
-    result: SyncResult,
-) -> None:
-    def _create(model: BaseModel) -> str:
-        with log_context(source_id=source_id):
-            return str(resource.create(model))
-
-    _persist(
-        resource, model_class, source_id, record, new_hash, state, result,
-        verb_past="Created", verb="create",
-        bucket=result.created, persist=_create,
-        post_persist=lambda i14y_id: _publish_initial_safely(
-            resource, i14y_id, source_id,
-        ),
-    )
-
-
-def _sync_update(
-    resource: ResourceClient,
-    model_class: type[BaseModel],
-    source_id: str,
-    i14y_id: str,
-    record: dict,
-    new_hash: str,
-    state: SyncState,
-    result: SyncResult,
-) -> None:
-    def _update(model: BaseModel) -> str:
-        with log_context(source_id=source_id, i14y_id=i14y_id):
-            resource.update(i14y_id, model)
-        return i14y_id
-
-    _persist(
-        resource, model_class, source_id, record, new_hash, state, result,
-        verb_past="Updated", verb="update",
-        bucket=result.updated, persist=_update,
-    )
-
-
-def _persist(
-    resource: ResourceClient,
-    model_class: type[BaseModel],
-    source_id: str,
-    record: dict,
-    new_hash: str,
-    state: SyncState,
-    result: SyncResult,
-    *,
-    verb_past: str,
-    verb: str,
-    bucket: list[str],
-    persist: Callable[[BaseModel], str],
-    post_persist: Callable[[str], None] | None = None,
-) -> None:
-    """Shared create/update flow.
-
-    Validates the model, hands it to ``persist`` (which performs the
-    actual API call and returns the I14Y id), applies any extras, runs
-    an optional ``post_persist`` step (used by create to publish), and
-    records the outcome in state + result. Any exception bubbling out
-    of ``persist`` is recorded as a failure for ``source_id``.
-    """
-    try:
-        model_input, extras = _split_extras(record)
-        model = model_class.model_validate(model_input)
-        i14y_id = persist(model)
-        logger.info("%s %s (%s)", verb_past, source_id, i14y_id)
-        if extras:
-            with log_context(source_id=source_id, i14y_id=i14y_id):
-                _apply_extras_safely(
-                    resource, i14y_id, extras, source_id, verb_past,
-                )
-        if post_persist is not None:
-            post_persist(i14y_id)
-        state.add(source_id, i14y_id, new_hash)
-        bucket.append(source_id)
-    except Exception as exc:
-        logger.error("Failed to %s %s: %s", verb, source_id, exc)
-        result.failed.append(
-            FailedRecord(source_id, str(exc), _transformed_title(record))
-        )
-
-
-def _publish_initial_safely(
-    resource: ResourceClient, i14y_id: str, source_id: str,
-) -> None:
-    try:
-        with log_context(source_id=source_id, i14y_id=i14y_id):
-            resource.publish_initial(i14y_id)
-    except Exception as exc:
-        logger.warning("Created %s but failed to publish: %s", source_id, exc)
-
-
-def _sync_delete(
-    resource: ResourceClient,
-    source_id: str,
-    i14y_id: str,
-    state: SyncState,
-    result: SyncResult,
-) -> None:
-    try:
-        with log_context(source_id=source_id, i14y_id=i14y_id):
-            resource.decommission_and_delete(i14y_id)
-        logger.info("Deleted %s (%s)", source_id, i14y_id)
-        state.remove(source_id)
-        result.deleted.append(source_id)
-    except Exception as exc:
-        logger.error("Failed to delete %s: %s", source_id, exc)
-        result.failed.append(FailedRecord(source_id, str(exc)))

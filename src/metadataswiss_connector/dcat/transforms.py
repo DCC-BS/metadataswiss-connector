@@ -19,6 +19,7 @@ from metadataswiss_connector.dcat.dlt_schema import (
     load_scalar_children,
     load_sibling_children,
 )
+from metadataswiss_connector.dcat.lookups import Lookups
 
 if TYPE_CHECKING:
     from metadataswiss_connector.registry import ResourceSpec
@@ -79,6 +80,7 @@ def run_transform(
     destination,
     *,
     publisher: str,
+    extra_lookups: dict[str, list[dict]] | None = None,
 ) -> None:
     """Transform raw resources to I14Y input models and load into DuckDB.
 
@@ -93,6 +95,7 @@ def run_transform(
             spec=spec,
             destination=destination,
             publisher=publisher,
+            extra_lookups=extra_lookups,
         )
 
 
@@ -103,8 +106,13 @@ def run_transform_resource(
     destination,
     *,
     publisher: str,
+    extra_lookups: dict[str, list[dict]] | None = None,
 ) -> dict:
     """Transform a single raw resource and load into the i14y_dcat dataset.
+
+    ``extra_lookups`` are synthetic lookup tables merged over the raw
+    sibling tables before they reach the transform — used by the
+    pipeline to expose e.g. the published-ID maps from sync state.
 
     Returns a stats dict ``{valid, invalid, raw_rows, loaded_tables}`` so
     callers (e.g. Dagster assets) can surface it as materialization
@@ -119,7 +127,7 @@ def run_transform_resource(
     load_info = pipeline_dcat.run(
         _read_and_transform(
             pipeline_raw, resource_name, spec.transform,
-            publisher=publisher, stats=stats,
+            publisher=publisher, stats=stats, extra_lookups=extra_lookups,
         ),
         table_name=resource_name,
         write_disposition="replace",
@@ -145,6 +153,7 @@ def _read_and_transform(
     *,
     publisher: str,
     stats: dict | None = None,
+    extra_lookups: dict[str, list[dict]] | None = None,
 ) -> Generator[dict, None, None]:
     """Read a raw resource table from DuckDB and yield transformed records.
 
@@ -156,9 +165,12 @@ def _read_and_transform(
         children_by_parent = load_scalar_children(
             client, pipeline.dataset_name, table_name
         )
-        siblings_by_parent, lookups = load_sibling_children(
+        siblings_by_parent, raw_lookups = load_sibling_children(
             client, pipeline.dataset_name, table_name, parent_key="id"
         )
+        # One Lookups view per run: its memoized indexes are shared by
+        # every per-record transform call below.
+        lookups = Lookups({**raw_lookups, **(extra_lookups or {})})
 
         with client.execute_query(f'SELECT * FROM "{table_name}"') as cursor:
             columns = [col[0] for col in cursor.description]

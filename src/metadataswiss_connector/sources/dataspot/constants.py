@@ -24,6 +24,12 @@ DATASET_STEREOTYPES = frozenset(
 )
 DATA_SERVICE_STEREOTYPES = frozenset({STEREOTYPE_DATA_PRODUCT_API})
 
+# Qualifier on a Dataspot ``Derivation`` that marks "this API produces
+# that dataset". An API's ``derivedFrom`` link returns derivations of
+# several kinds; only ``SPEZ2`` ones map to I14Y ``servesDatasets``.
+# Other qualifiers describe unrelated lineage we must not surface.
+DERIVATION_QUALIFIER_PRODUCES = "SPEZ2"
+
 # Role UUID identifying the "data owner" attribution in Dataspot.
 # The collection's ``attributedTo`` endpoint returns Attribution
 # objects whose ``attributedTo`` value points to a Post (a role

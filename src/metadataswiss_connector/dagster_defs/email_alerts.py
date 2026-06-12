@@ -1,15 +1,14 @@
-"""Run-failure email alerting for the Dagster deployment.
+"""Email-alert sensors for the Dagster deployment.
 
-Sends a summary email (with the run's full event log attached) to the
-recipients listed in ``EMAIL_TO`` whenever a run fails. SMTP is
-configured via the standard ``SMTP_*`` env vars; if any required var is
-missing the sensor logs a warning and skips silently rather than
-breaking the run.
+Two concerns live here: SMTP transport (configured via the standard
+``SMTP_*`` env vars; if any required var is missing the sensors log a
+warning and skip rather than breaking the run) and the sensors that
+collect run logs / invalid-record metadata. Rendering of the
+invalid-records mail lives in ``invalid_records_report``.
 """
 
 from __future__ import annotations
 
-import html
 import json
 import os
 import smtplib
@@ -20,9 +19,16 @@ from dagster import (
     DagsterRunStatus,
     RunFailureSensorContext,
     RunStatusSensorContext,
-    SkipReason,
     run_failure_sensor,
     run_status_sensor,
+)
+
+from metadataswiss_connector.dagster_defs.invalid_records_report import (
+    build_issues,
+    group_issues,
+    render_attachment,
+    render_html,
+    render_text,
 )
 
 
@@ -138,7 +144,10 @@ def _send_email(
 def email_on_run_failure(context: RunFailureSensorContext):
     cfg = _smtp_config()
     if cfg is None:
-        return SkipReason("SMTP env vars not configured (need SMTP_HOST, SMTP_FROM, EMAIL_TO)")
+        context.log.warning(
+            "SMTP env vars not configured (need SMTP_HOST, SMTP_FROM, EMAIL_TO)"
+        )
+        return
 
     summary, full_log = _collect_run_logs(context)
     subject = f"[metadataswiss-connector] Run failed: {context.dagster_run.job_name}"
@@ -148,7 +157,6 @@ def email_on_run_failure(context: RunFailureSensorContext):
         _send_email(cfg, subject, summary, (attachment_name, full_log or "(no log entries)"))
     except Exception as exc:  # noqa: BLE001
         context.log.warning(f"Failed to send failure email: {exc}")
-        return SkipReason(f"Email send failed: {exc}")
 
 
 def _collect_invalid_records(context: RunStatusSensorContext) -> list[dict]:
@@ -170,191 +178,20 @@ def _collect_invalid_records(context: RunStatusSensorContext) -> list[dict]:
             continue
         materialization = event.event_specific_data.materialization
         asset_key = "/".join(materialization.asset_key.path) if materialization.asset_key else "?"
-        entry = materialization.metadata.get("invalid_details_json")
-        if entry is None:
+        metadata_value = materialization.metadata.get("invalid_details_json")
+        if metadata_value is None:
             continue
         try:
-            details = json.loads(entry.value) if isinstance(entry.value, str) else entry.value
+            details = (
+                json.loads(metadata_value.value)
+                if isinstance(metadata_value.value, str)
+                else metadata_value.value
+            )
         except (ValueError, TypeError):
             continue
         for d in details or []:
             out.append({"asset": asset_key, **d})
     return out
-
-
-# Human labels for the pipeline stage an issue surfaced at. ``transform``
-# = the record failed local validation against the I14Y contract;
-# ``publish`` = I14Y's API rejected the request. Both are fixed in
-# dataspot, but the distinction tells maintainers where to look.
-_STAGE_LABELS = {"transform": "Validierung", "publish": "I14Y-Publish"}
-
-# dataspot UI path segment per resource kind. Data products (datasets and
-# APIs/dataservices) live under ``datasets``; code-list concepts under
-# ``enumerations``. Used to fill the ``{type}`` slot of the link template.
-_KIND_URL_SEGMENT = {
-    "dataset": "datasets",
-    "dataservice": "datasets",
-    "concept": "enumerations",
-}
-
-
-def _dataspot_link(record_id: object, kind: str | None) -> str | None:
-    """Deep-link into the dataspot UI for a record.
-
-    Built from the source connection env vars ``SOURCES__DATASPOT__BASE_URL``
-    and ``SOURCES__DATASPOT__DATABASE_NAME`` plus dataspot's fixed UI route
-    ``/web/{database}/{type}/{id}``, where ``{type}`` resolves per record
-    kind (datasets vs enumerations). Returns ``None`` if either env var is
-    unset so the mail degrades to title + UUID only.
-    """
-    base = os.environ.get("SOURCES__DATASPOT__BASE_URL")
-    database = os.environ.get("SOURCES__DATASPOT__DATABASE_NAME")
-    if not base or not database or not record_id:
-        return None
-    segment = _KIND_URL_SEGMENT.get(kind or "", "datasets")
-    return f"{base.rstrip('/')}/web/{database}/{segment}/{record_id}"
-
-
-def _group_heading(stage: str, field: str | None) -> str:
-    stage_label = _STAGE_LABELS.get(stage, stage)
-    if field:
-        return f"{field} ({stage_label})"
-    return f"Record abgelehnt ({stage_label})"
-
-
-def _build_issues(invalid: list[dict]) -> list[dict]:
-    """Flatten invalid records into one issue per failing field.
-
-    Transform records carry structured ``field_errors`` (one issue each);
-    publish failures (and any legacy entry) collapse to a single issue
-    built from the ``errors`` string.
-    """
-    issues: list[dict] = []
-    for row in invalid:
-        base = {
-            "id": row.get("id"),
-            "title": row.get("title"),
-            "asset": row.get("asset"),
-            "stage": row.get("stage", "transform"),
-            "kind": row.get("kind"),
-        }
-        field_errors = row.get("field_errors")
-        if field_errors:
-            for fe in field_errors:
-                issues.append({
-                    **base,
-                    "field": fe.get("field"),
-                    "message": fe.get("message", ""),
-                    "value": fe.get("value"),
-                })
-        else:
-            issues.append({
-                **base,
-                "field": None,
-                "message": row.get("errors") or "(unbekannter Fehler)",
-                "value": None,
-            })
-    return issues
-
-
-def _group_issues(issues: list[dict]) -> list[tuple[tuple[str, str | None], list[dict]]]:
-    """Group issues by (stage, field), most frequent first.
-
-    Grouping by field (not the exact message) keeps all records that have
-    a problem with the *same* field together — that's the unit a dataspot
-    maintainer fixes. The specific message is shown per row instead.
-    """
-    groups: dict[tuple[str, str | None], list[dict]] = {}
-    for it in issues:
-        key = (it["stage"], it["field"])
-        groups.setdefault(key, []).append(it)
-    return sorted(
-        groups.items(),
-        key=lambda kv: (-len(kv[1]), kv[0][0], kv[0][1] or ""),
-    )
-
-
-def _datensaetze(n: int) -> str:
-    return "1 Datensatz" if n == 1 else f"{n} Datensätze"
-
-
-def _intro(total_records: int) -> str:
-    if total_records == 1:
-        return (
-            "1 Datensatz wurde beim Sync nach I14Y übersprungen. Bitte in "
-            "dataspot korrigieren, damit er beim nächsten Lauf publiziert wird."
-        )
-    return (
-        f"{total_records} Datensätze wurden beim Sync nach I14Y übersprungen. "
-        "Bitte in dataspot korrigieren, damit sie beim nächsten Lauf publiziert werden."
-    )
-
-
-def _render_text(groups, total_records: int) -> str:
-    lines = [_intro(total_records), ""]
-    for (stage, field), items in groups:
-        lines.append(f"▌ {_group_heading(stage, field)} — {_datensaetze(len(items))}")
-        for it in items:
-            title = it["title"] or "(ohne Titel)"
-            value = f" → Wert: {it['value']}" if it.get("value") else ""
-            link = _dataspot_link(it["id"], it.get("kind"))
-            link_txt = f"\n     {link}" if link else f"  [{it['id']}]"
-            lines.append(f"   • {title} — {it['message']}{value}{link_txt}")
-        lines.append("")
-    return "\n".join(lines)
-
-
-def _render_html(groups, total_records: int) -> str:
-    esc = html.escape
-    parts = [
-        '<html><body style="font-family:Arial,Helvetica,sans-serif;color:#222;">',
-        f"<p>{esc(_intro(total_records))}</p>",
-        '<table cellpadding="6" cellspacing="0" border="0"'
-        ' style="border-collapse:collapse;width:100%;">',
-        '<tr style="background:#e8e8e8;text-align:left;">'
-        "<th>Datensatz</th><th>Problem</th><th>Wert</th></tr>",
-    ]
-    for (stage, field), items in groups:
-        # One section header row spanning the table, then the records.
-        parts.append(
-            '<tr><td colspan="3"'
-            ' style="background:#f6f6f6;border-top:2px solid #ccc;'
-            'padding-top:10px;font-weight:bold;">'
-            f"{esc(_group_heading(stage, field))}"
-            f' <span style="color:#888;font-weight:normal;">'
-            f"— {_datensaetze(len(items))}</span></td></tr>"
-        )
-        for it in items:
-            rid = esc(str(it["id"]))
-            link = _dataspot_link(it["id"], it.get("kind"))
-            title_text = esc(it["title"] or "(ohne Titel)")
-            if link:
-                title_cell = f'<a href="{esc(link)}">{title_text}</a>'
-            else:
-                title_cell = title_text
-            value = esc(it["value"]) if it.get("value") else ""
-            parts.append(
-                '<tr style="border-bottom:1px solid #eee;">'
-                f"<td>{title_cell}"
-                f'<br><span style="font-family:monospace;font-size:85%;color:#999;">{rid}</span></td>'
-                f"<td>{esc(it['message'])}</td>"
-                f'<td style="font-family:monospace;">{value}</td></tr>'
-            )
-    parts.append("</table></body></html>")
-    return "\n".join(parts)
-
-
-def _render_attachment(issues: list[dict]) -> str:
-    """Full, flat detail report attached for the record/audit trail."""
-    lines: list[str] = []
-    for it in issues:
-        lines.append(
-            f"[{it['stage']}] {it['asset']} | id={it['id']} | title={it.get('title')!r}"
-        )
-        lines.append(f"    field={it.get('field')} value={it.get('value')!r}")
-        lines.append(f"    {it['message']}")
-        lines.append("")
-    return "\n".join(lines) or "(keine Details)"
 
 
 @run_status_sensor(
@@ -372,20 +209,23 @@ def email_on_invalid_records(context: RunStatusSensorContext):
     """
     invalid = _collect_invalid_records(context)
     if not invalid:
-        return SkipReason("No invalid records in this run")
+        return
 
     cfg = _smtp_config()
     if cfg is None:
-        return SkipReason("SMTP env vars not configured (need SMTP_HOST, SMTP_FROM, EMAIL_TO)")
+        context.log.warning(
+            "SMTP env vars not configured (need SMTP_HOST, SMTP_FROM, EMAIL_TO)"
+        )
+        return
 
     run = context.dagster_run
-    issues = _build_issues(invalid)
-    groups = _group_issues(issues)
+    issues = build_issues(invalid)
+    groups = group_issues(issues)
     total_records = len({(d.get("stage"), d.get("id")) for d in invalid})
 
-    text_body = _render_text(groups, total_records)
-    html_body = _render_html(groups, total_records)
-    report = _render_attachment(issues)
+    text_body = render_text(groups, total_records)
+    html_body = render_html(groups, total_records)
+    report = render_attachment(issues)
     subject = (
         f"[metadataswiss-connector] {total_records} Datensätze mit "
         f"Qualitätsproblemen ({run.job_name})"
@@ -398,4 +238,3 @@ def email_on_invalid_records(context: RunStatusSensorContext):
         )
     except Exception as exc:  # noqa: BLE001
         context.log.warning(f"Failed to send invalid-records email: {exc}")
-        return SkipReason(f"Email send failed: {exc}")

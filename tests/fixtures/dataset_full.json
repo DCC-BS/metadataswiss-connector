@@ -1,0 +1,71 @@
+{
+  "record": {
+    "id": "ds-001",
+    "label": "Wohnbevölkerung nach Alter",
+    "description": "<p>Jährliche Wohnbevölkerung des Kantons.</p>",
+    "spatial": "https://example.org/spatial/BS",
+    "accrual_periodicity": "http://publications.europa.eu/resource/authority/frequency/ANNUAL",
+    "temporal_start": 1577836800000,
+    "temporal_end": 1609459200000,
+    "custom_properties__publication_date": 1700000000000,
+    "custom_properties__last_update": 1705000000000,
+    "custom_properties__geo_category": "society",
+    "custom_properties__retention_period": 10,
+    "custom_properties__retention_justification": "gesetzliche Aufbewahrung",
+    "custom_properties__i14y_dataset_landing_page": "https://example.org/dataset/ds-001",
+    "custom_properties__i14y_dataset_version": "1.2.0",
+    "custom_properties__i14y_dataset_version_notes": "Korrektur der Altersklassen"
+  },
+  "children": {
+    "tags": ["bevölkerung", "demografie"],
+    "custom_properties__personal_data": ["natural_person", "none"],
+    "custom_properties__topics": ["001"],
+    "distributions": [
+      {
+        "id": "dist-b",
+        "label": "CSV-Export",
+        "description": "<p>Komma-getrennt</p>",
+        "access_url": "https://example.org/data/b.csv",
+        "format": "csv",
+        "date_created": 1690000000000
+      },
+      {
+        "id": "dist-a",
+        "label": "JSON-Export",
+        "description": null,
+        "access_url": "https://example.org/data/a.json",
+        "format": "json",
+        "date_created": 1690000000000
+      },
+      {
+        "id": "dist-c",
+        "label": "Ohne URL",
+        "access_url": null,
+        "format": "pdf"
+      }
+    ]
+  },
+  "lookups": {
+    "dataset_collection_path": [
+      {"dataset_id": "ds-001", "collection_id": "col-child", "depth": 0},
+      {"dataset_id": "ds-001", "collection_id": "col-parent", "depth": 1}
+    ],
+    "collections": [
+      {"id": "col-child", "label": "Fachstelle Statistik"},
+      {"id": "col-parent", "label": "Präsidialdepartement"}
+    ],
+    "collection_agencies": [
+      {
+        "collection_id": "col-child",
+        "email": "statistik@bs.ch",
+        "phone": "+41 61 000 00 00",
+        "location_address": "Binningerstrasse 6",
+        "location_code_city": "4051 Basel"
+      }
+    ],
+    "collection_data_owners": [
+      {"collection_id": "col-parent", "name": "Präsidialdepartement"}
+    ],
+    "dataset_structure_components": []
+  }
+}

@@ -15,6 +15,7 @@ from dlt.sources.helpers.rest_client import RESTClient
 
 from metadataswiss_connector.sources.dataspot.constants import (
     DATA_OWNER_ROLE_UUID,
+    DERIVATION_QUALIFIER_PRODUCES,
     PUBLIC_STATE,
     STAATSKALENDER_BASE_URL,
     STAATSKALENDER_DEFAULT_WAIT_SECONDS,
@@ -54,6 +55,7 @@ class DataspotEnrichment:
         self._post_agent_label_cache: dict[str, str | None] = {}
         self._attribute_cache: dict[str, dict] = {}
         self._datatype_cache: dict[str, dict] = {}
+        self._derived_dataset_cache: dict[str, list[str] | None] = {}
 
     # --- caching helpers -------------------------------------------------
 
@@ -99,6 +101,33 @@ class DataspotEnrichment:
         if href not in self._datatype_cache:
             self._datatype_cache[href] = self.client.get(href).json()
         return self._datatype_cache[href]
+
+    def fetch_derived_dataset_ids(self, dataset_id: str) -> list[str]:
+        """Dataspot dataset IDs an API produces, per its SPEZ2 derivations.
+
+        An API's ``datasets/{id}/derivedFrom`` link returns ``Derivation``
+        objects in ``_embedded.derivedFrom``; each carries a ``derivedFrom``
+        target ID and a ``qualifier``. We keep only ``SPEZ2`` derivations
+        (the "produces" relation) and return their target dataset IDs.
+        """
+        def _load() -> list[str]:
+            payload = self.client.get(
+                f"/rest/{self.database_name}/datasets/{dataset_id}/derivedFrom"
+            ).json()
+            return [
+                target
+                for derivation in payload.get("_embedded", {}).get("derivedFrom", [])
+                or []
+                if derivation.get("qualifier") == DERIVATION_QUALIFIER_PRODUCES
+                and (target := derivation.get("derivedFrom"))
+            ]
+
+        return (
+            self._safe_cached(
+                self._derived_dataset_cache, dataset_id, _load, "derivedFrom"
+            )
+            or []
+        )
 
     def fetch_post_agent_label(self, post_id: str) -> str | None:
         def _load() -> str | None:

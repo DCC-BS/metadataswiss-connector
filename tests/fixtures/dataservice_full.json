@@ -1,0 +1,36 @@
+{
+  "record": {
+    "id": "api-001",
+    "label": "Bevölkerungs-API",
+    "description": "<p>REST-Schnittstelle zur Wohnbevölkerung.</p>",
+    "custom_properties__publication_date": 1700000000000,
+    "custom_properties__last_update": 1705000000000,
+    "custom_properties__i14y_api_access_rights": "https://example.org/access-right/PUBLIC",
+    "custom_properties__i14y_api_landing_page": "https://example.org/api/api-001",
+    "custom_properties__i14y_api_endpoint_url": "https://api.example.org/v1/population"
+  },
+  "children": {
+    "tags": ["api", "bevölkerung"],
+    "custom_properties__i14y_api_endpoint_description": [
+      "https://api.example.org/v1/openapi.json",
+      "https://api.example.org/v1/docs"
+    ]
+  },
+  "lookups": {
+    "dataset_collection_path": [
+      {"dataset_id": "api-001", "collection_id": "col-child", "depth": 0}
+    ],
+    "collections": [
+      {"id": "col-child", "label": "Fachstelle Statistik"}
+    ],
+    "collection_agencies": [
+      {
+        "collection_id": "col-child",
+        "email": "statistik@bs.ch",
+        "phone": "+41 61 000 00 00",
+        "location_address": "Binningerstrasse 6",
+        "location_code_city": "4051 Basel"
+      }
+    ]
+  }
+}

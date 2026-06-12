@@ -20,7 +20,12 @@ i14y-client = { path = "packages/i14y-client", editable = true }
 [dependency-groups]
 dev = [
     "datamodel-code-generator>=0.56.0",
+    "pytest>=8.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
 
 [build-system]
 requires = ["hatchling"]

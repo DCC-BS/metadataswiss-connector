@@ -26,11 +26,11 @@ dataspot_catalog_source = CatalogSource(
             transform_to_dataservice,
             kind="dataservice",
             lookups=(
-                "distributions",
                 "dataset_collection_path",
                 "collection_data_owners",
                 "collection_agencies",
                 "collections",
+                "dataservice_serves_datasets",
             ),
         ),
         "code_lists": ResourceSpec(

@@ -1,26 +1,20 @@
 """Shared dlt + I14Y client helpers."""
 
 import logging
-import os
 from typing import TYPE_CHECKING
 
 import dlt
 
 from i14y_client import I14YAuth, I14YClient
-from metadataswiss_connector.config import I14YConfig
+from metadataswiss_connector.config import I14YConfig, duckdb_path
 
 if TYPE_CHECKING:
     from metadataswiss_connector.registry import CatalogSource
 
-# Location of the local DuckDB warehouse. Override via ``DUCKDB_PATH`` to
-# point at a persistent volume in a containerised deployment; defaults to a
-# file in the working directory for local/CLI use.
-DUCKDB_PATH = os.environ.get("DUCKDB_PATH", "data/metadata.duckdb")
-
 
 def duckdb_destination():
     """Shared DuckDB destination used by raw and DCAT pipelines."""
-    return dlt.destinations.duckdb(DUCKDB_PATH)
+    return dlt.destinations.duckdb(duckdb_path())
 
 
 def raw_pipeline_for(source: "CatalogSource") -> dlt.Pipeline:

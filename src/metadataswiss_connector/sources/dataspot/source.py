@@ -64,34 +64,24 @@ def _as_list(items):
     return [items] if isinstance(items, dict) else items
 
 
-@dlt.source(name="dataspot")
+@dlt.source(name="dataspot", section="dataspot")
 def dataspot_source(
-    base_url: str | None = None,
-    database_name: str | None = None,
-    exposed_client_id: str | None = None,
-    tenant_id: str | None = None,
-    client_id: str | None = None,
-    client_secret: str | None = None,
-    dataspot_access_key: str | None = None,
+    base_url: str = dlt.config.value,
+    database_name: str = dlt.config.value,
+    exposed_client_id: str = dlt.config.value,
+    tenant_id: str = dlt.secrets.value,
+    client_id: str = dlt.secrets.value,
+    client_secret: str = dlt.secrets.value,
+    dataspot_access_key: str = dlt.secrets.value,
 ):
     """dlt source for the Dataspot metadata catalog REST API.
 
-    Any argument left as ``None`` is resolved from dlt's config/secrets
-    system via env vars under the ``SOURCES__DATASPOT__*`` naming (loaded
-    from ``.env``; see ``.env.example``). Explicit arguments take precedence.
+    Arguments not passed explicitly are injected by dlt's config/secrets
+    system from the ``sources.dataspot.*`` section — i.e. env vars under
+    the ``SOURCES__DATASPOT__*`` naming (loaded from ``.env``; see
+    ``.env.example``). The explicit ``section`` pins that lookup path
+    independently of this module's name.
     """
-    base_url = base_url or dlt.config["sources.dataspot.base_url"]
-    database_name = database_name or dlt.config["sources.dataspot.database_name"]
-    exposed_client_id = (
-        exposed_client_id or dlt.config["sources.dataspot.exposed_client_id"]
-    )
-    tenant_id = tenant_id or dlt.secrets["sources.dataspot.tenant_id"]
-    client_id = client_id or dlt.secrets["sources.dataspot.client_id"]
-    client_secret = client_secret or dlt.secrets["sources.dataspot.client_secret"]
-    dataspot_access_key = (
-        dataspot_access_key or dlt.secrets["sources.dataspot.dataspot_access_key"]
-    )
-
     auth = DataspotAuth(
         access_token_url=f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
         client_id=client_id,
@@ -186,6 +176,25 @@ def dataspot_source(
         for item in _as_list(items):
             if item.get("stereotype") in DATA_SERVICE_STEREOTYPES:
                 yield item
+
+    @dlt.transformer(
+        data_from=data_products_all,
+        name="dataservice_serves_datasets",
+        primary_key=["dataservice_id", "dataset_id"],
+        write_disposition="replace",
+    )
+    def dataservice_serves_datasets(items):
+        """Per (API, produced-dataset) row for I14Y ``servesDatasets``.
+
+        Only API records carry the ``derivedFrom`` link we care about; for
+        each we emit one row per SPEZ2-derived dataset. ``replace`` so a
+        derivation removed in Dataspot also drops out of the lookup.
+        """
+        for item in _as_list(items):
+            if item.get("stereotype") not in DATA_SERVICE_STEREOTYPES:
+                continue
+            for dataset_id in enrichment.fetch_derived_dataset_ids(item["id"]):
+                yield {"dataservice_id": item["id"], "dataset_id": dataset_id}
 
     @dlt.transformer(
         data_from=data_products_all,
@@ -337,6 +346,7 @@ def dataspot_source(
         *resources,
         data_products,
         data_services,
+        dataservice_serves_datasets,
         collections,
         dataset_collection_path,
         collection_agencies,

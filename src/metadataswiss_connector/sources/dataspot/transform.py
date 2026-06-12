@@ -1,8 +1,7 @@
 """Dataspot-specific field mapping to I14Y DCAT format."""
 
-from datetime import datetime, timezone
-
 from metadataswiss_connector.dcat import builders as dcat
+from metadataswiss_connector.dcat.lookups import Lookups, published_ids_table
 from metadataswiss_connector.sources.dataspot import mappings
 from metadataswiss_connector.sources.dataspot.structure import (
     build_dataset_shacl_turtle,
@@ -26,6 +25,7 @@ from metadataswiss_connector.dcat.i14y_models import (
     DcatDistributionInputModel,
     EmailInputModel,
     IdentifierInputModel,
+    IdModel,
     ResourceModel,
     VCardModel,
 )
@@ -35,7 +35,7 @@ def transform_to_dataset(
     record: dict,
     children: dict[str, list],
     *,
-    lookups: dict[str, list[dict]],
+    lookups: Lookups,
     publisher: str,
 ) -> tuple[DcatDatasetInputModel, dict] | DcatDatasetInputModel:
     """Map a flattened Dataspot dataset row to a DcatDatasetInputModel.
@@ -44,9 +44,9 @@ def transform_to_dataset(
         record: Flattened row from DuckDB. Nested fields use dlt's ``__``
                 separator (e.g. ``custom_properties__publisher``).
         children: dlt 1:n child tables keyed by field name (e.g. ``tags``).
-        lookups: cross-reference tables (e.g. ``collections``,
-                 ``dataset_collection_path``, ``collection_agencies``,
-                 ``collection_data_owners``) keyed by table name.
+        lookups: per-run view over the cross-reference tables (e.g.
+                 ``collections``, ``dataset_collection_path``,
+                 ``collection_agencies``, ``collection_data_owners``).
         publisher: I14Y publisher identifier (e.g. "Basel-Stadt").
                    Configured globally via I14Y_PUBLISHER_IDENTIFIER env var.
     """
@@ -67,10 +67,9 @@ def transform_to_dataset(
     structure_ttl = build_dataset_shacl_turtle(
         dataset_id=record["id"],
         dataset_label=record.get("label"),
-        components=[
-            c for c in lookups.get("dataset_structure_components", [])
-            if c.get("dataset_id") == record["id"]
-        ],
+        components=lookups.by("dataset_structure_components", "dataset_id").get(
+            record["id"], []
+        ),
     )
     model = DcatDatasetInputModel(
         data_owner=data_owner,
@@ -110,76 +109,59 @@ def transform_to_dataset(
     return model
 
 
-def _resolve_data_owner(
-    dataset_id: str, lookups: dict[str, list[dict]]
-) -> str | None:
+def _ancestor_paths(dataset_id: str, lookups: Lookups) -> list[dict]:
+    """The dataset's collection ancestry (``dataset_collection_path``),
+    nearest-first.
+
+    collection_id breaks depth ties deterministically: equal-depth
+    ancestors otherwise fall back to the unordered lookup row order,
+    which can pick a different ancestor between runs and flip the
+    payload hash.
+    """
+    paths = lookups.by("dataset_collection_path", "dataset_id").get(dataset_id, [])
+    return sorted(
+        paths, key=lambda p: (p.get("depth", 0), str(p.get("collection_id") or ""))
+    )
+
+
+def _resolve_data_owner(dataset_id: str, lookups: Lookups) -> str | None:
     """Resolve the dataset's data-owner name from its collection ancestry.
 
-    Walks ``dataset_collection_path`` nearest-first and returns the first
-    ancestor's data-owner name from ``collection_data_owners`` (already
-    resolved in the source via attribution → post → postAgents label).
+    Walks the ancestry nearest-first and returns the first ancestor's
+    data-owner name from ``collection_data_owners`` (already resolved in
+    the source via attribution → post → postAgents label).
     """
-    # collection_id breaks depth ties deterministically: equal-depth
-    # ancestors otherwise fall back to the unordered lookup row order,
-    # which can pick a different owner between runs and flip the hash.
-    paths = sorted(
-        (
-            p for p in lookups.get("dataset_collection_path", [])
-            if p.get("dataset_id") == dataset_id
-        ),
-        key=lambda p: (p.get("depth", 0), str(p.get("collection_id") or "")),
-    )
-    if not paths:
-        return None
-    name_by_collection = {
-        o.get("collection_id"): o.get("name")
-        for o in lookups.get("collection_data_owners", [])
-    }
-    for path in paths:
-        name = name_by_collection.get(path.get("collection_id"))
-        if name:
-            return name
+    owners = lookups.unique_by("collection_data_owners", "collection_id")
+    for path in _ancestor_paths(dataset_id, lookups):
+        owner = owners.get(path.get("collection_id"))
+        if owner and owner.get("name"):
+            return owner["name"]
     return None
 
 
 def _organizational_unit_contact_points(
-    dataset_id: str, lookups: dict[str, list[dict]]
+    dataset_id: str, lookups: Lookups
 ) -> list[VCardModel]:
     """Build VCardModel contact points from the dataset's owning agency.
 
-    Walks the dataset's collection ancestry (``dataset_collection_path``)
-    from nearest to furthest, picking the first ancestor whose collection
-    has a matching row in ``collection_agencies`` (i.e. a collection with
-    stereotype ``organizationalUnit`` resolved to a Staatskalender agency).
+    Walks the dataset's collection ancestry from nearest to furthest,
+    picking the first ancestor whose collection has a matching row in
+    ``collection_agencies`` (i.e. a collection with stereotype
+    ``organizationalUnit`` resolved to a Staatskalender agency).
     The agency's ``email`` becomes ``hasEmail``; the collection's ``label``
     populates ``fn``.
     """
-    paths = [
-        p for p in lookups.get("dataset_collection_path", [])
-        if p.get("dataset_id") == dataset_id
-    ]
-    if not paths:
-        return []
-    # See _resolve_data_owner: collection_id breaks depth ties so the
-    # chosen agency is stable across runs.
-    paths.sort(key=lambda p: (p.get("depth", 0), str(p.get("collection_id") or "")))
-
-    agencies_by_collection = {
-        a.get("collection_id"): a for a in lookups.get("collection_agencies", [])
-    }
-    collections_by_id = {
-        c.get("id"): c for c in lookups.get("collections", [])
-    }
-
-    for path in paths:
+    agencies = lookups.unique_by("collection_agencies", "collection_id")
+    collections = lookups.unique_by("collections", "id")
+    for path in _ancestor_paths(dataset_id, lookups):
         collection_id = path.get("collection_id")
-        agency = agencies_by_collection.get(collection_id)
+        agency = agencies.get(collection_id)
         if not agency:
             continue
         email = agency.get("email")
         if not email:
             continue
-        collection = collections_by_id.get(collection_id, {})
+        collection = collections.get(collection_id, {})
         return [
             VCardModel(
                 fn=dcat.multi_language(collection.get("label")),
@@ -202,7 +184,7 @@ def transform_to_dataservice(
     record: dict,
     children: dict[str, list],
     *,
-    lookups: dict[str, list[dict]],
+    lookups: Lookups,
     publisher: str,
 ) -> DataServiceInputModel:
     """Map a flattened Dataspot API record to a DataServiceInputModel.
@@ -222,6 +204,7 @@ def transform_to_dataservice(
         ),
         identifiers=[record["id"]],
         publisher=IdentifierInputModel(identifier=publisher),
+        serves_datasets=_resolve_serves_datasets(record["id"], lookups) or None,
         access_rights=_dataservice_access_rights(record),
         issued=dcat.epoch_ms_to_datetime(
             record.get("custom_properties__publication_date")
@@ -242,6 +225,34 @@ def transform_to_dataservice(
         )
         or None,
     )
+
+
+def _resolve_serves_datasets(
+    dataservice_id: str, lookups: Lookups
+) -> list[IdModel]:
+    """I14Y datasets this API produces (Dataspot SPEZ2 derivations).
+
+    The source emits ``(dataservice_id, dataspot dataset_id)`` pairs into
+    the ``dataservice_serves_datasets`` lookup; each dataspot id is
+    resolved to its published I14Y UUID via the datasets' published-ID
+    lookup, which the pipeline injects from sync state (see
+    ``pipeline.published_id_lookups``). Datasets not yet published (no
+    UUID) are skipped — a brand-new dataset+API pair therefore links on
+    the run *after* the dataset is first published. Sorted for a stable
+    payload hash.
+    """
+    rows = lookups.by("dataservice_serves_datasets", "dataservice_id").get(
+        dataservice_id, []
+    )
+    dataspot_ids = sorted(
+        {row["dataset_id"] for row in rows if row.get("dataset_id")}
+    )
+    published = lookups.unique_by(published_ids_table("data_products"), "source_id")
+    return [
+        IdModel(id=published[dataspot_id]["i14y_id"])
+        for dataspot_id in dataspot_ids
+        if dataspot_id in published
+    ]
 
 
 def _dataservice_access_rights(record: dict) -> CodeInputModel:
@@ -278,7 +289,7 @@ def transform_to_concept(
     record: dict,
     children: dict[str, list],
     *,
-    lookups: dict[str, list[dict]],
+    lookups: Lookups,
     publisher: str,
 ) -> tuple[CodeListConceptInput, dict]:
     """Map a Dataspot enumeration row to a CodeListConceptInput.
@@ -290,12 +301,21 @@ def transform_to_concept(
     concept's I14Y UUID is known.
     """
     # Enumerations expose no customProperties — ``date_created`` is the
-    # only timestamp available in the source payload.
+    # only timestamp available in the source payload. Fall back to the
+    # fixed open-lower-bound sentinel rather than ``datetime.now()``: a
+    # wall-clock default would change the payload hash on every run and
+    # trigger a spurious re-publish for any concept missing date_created.
     valid_from = (
         dcat.epoch_ms_to_datetime(record.get("date_created"))
-        or datetime.now(timezone.utc)
+        or dcat.epoch_ms_to_datetime(DATASPOT_VALID_FROM_SENTINEL)
     )
-    raw_entries = children.get("code_list_entries", [])
+    # Sort by a stable entry key: ``code_list_entries`` is a dlt child
+    # table whose read order isn't guaranteed, so without this the entries
+    # list order — and thus the payload hash — can vary between runs.
+    raw_entries = sorted(
+        children.get("code_list_entries", []),
+        key=lambda e: (str(e.get("code") or ""), str(e.get("id") or "")),
+    )
     model = CodeListConceptInput(
         identifier=record["id"],
         name=dcat.multi_language(record.get("label")),
@@ -367,14 +387,15 @@ def _value_type_from_entries(entries: list[dict]) -> CodeListEntryValueType:
     """Infer code-list value type from the ``code`` of each entry.
 
     I14Y only allows ``Numeric`` if every code parses as a number;
-    otherwise we fall back to ``String``.
+    otherwise we fall back to ``String``. Codeless entries are ignored
+    here just as ``_build_entries`` drops them, so they don't force the
+    type to ``String`` for a list that is otherwise fully numeric. When no
+    entry carries a code, the default value type applies.
     """
-    if not entries:
+    codes = [entry.get("code") for entry in entries if entry.get("code")]
+    if not codes:
         return DEFAULT_CODE_LIST_VALUE_TYPE
-    for entry in entries:
-        code = entry.get("code")
-        if code is None:
-            return CodeListEntryValueType.string
+    for code in codes:
         try:
             float(str(code))
         except ValueError:

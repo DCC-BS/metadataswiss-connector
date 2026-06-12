@@ -37,12 +37,15 @@ from metadataswiss_connector.pipeline import publish_resource, transform_resourc
 from metadataswiss_connector.registry import CatalogSource
 from metadataswiss_connector.resources import raw_pipeline_for
 
-# Concurrency pool name for assets that hold an exclusive write lock on
-# the local DuckDB file. DuckDB only allows one writing process per
-# file, so without a pool two parallel asset materializations crash
-# with a "Conflicting lock" IOError. The pool's concurrency limit is
-# set in dagster.yaml (default_limit: 1). The published asset reads via
-# ``read_only=True`` and stays out of the pool.
+# Concurrency pool name for every asset that opens the local DuckDB file.
+# DuckDB's file lock is cross-process and exclusive: a process holding the
+# file open — even ``read_only=True`` — blocks any other process from
+# opening it read-write. Under Dagster's multiprocess/subprocess execution
+# each asset runs in its own process, so without a single-slot pool a
+# read-only ``published`` asset overlapping a read-write ``transformed``
+# asset crashes the writer with a "Conflicting lock" IOError. Every
+# DuckDB-touching asset (extract, transformed, AND published) therefore
+# shares this pool; its limit is set in dagster.yaml (default_limit: 1).
 DUCKDB_WRITER_POOL = "duckdb_writer"
 
 
@@ -180,6 +183,10 @@ def _build_published(source: CatalogSource, resource_name: str) -> AssetsDefinit
         deps=[transformed_name],
         group_name=f"{source.name}_published",
         kinds={"python", "i14y"},
+        # Reads DuckDB (read_only) before syncing to I14Y. A read-only handle
+        # still blocks a concurrent writer cross-process, so this asset shares
+        # the writer pool — see DUCKDB_WRITER_POOL.
+        pool=DUCKDB_WRITER_POOL,
         check_specs=[
             AssetCheckSpec(
                 name="no_failures",

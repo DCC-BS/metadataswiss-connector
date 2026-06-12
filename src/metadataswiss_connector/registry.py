@@ -12,6 +12,7 @@ import dlt
 from dlt.sources import DltSource
 from pydantic import BaseModel
 
+from metadataswiss_connector.dcat.lookups import Lookups
 from metadataswiss_connector.dcat.transforms import run_transform
 
 
@@ -27,6 +28,11 @@ class TransformFn(Protocol):
     child field name (e.g. ``"tags"`` → ``["foo", "bar"]``). Sources
     that don't use children can ignore the argument.
 
+    ``lookups`` is the per-run ``Lookups`` view over the source's
+    cross-reference tables (plus pipeline-injected synthetic tables like
+    the published-ID maps); one instance is shared across all records of
+    a run so its memoized indexes amortise.
+
     The return value is either the typed Pydantic model alone, or a
     ``(model, extras)`` tuple. ``extras`` is a JSON-serialisable dict
     carrying sidecar payloads that the I14Y model itself can't hold —
@@ -41,7 +47,7 @@ class TransformFn(Protocol):
         record: dict,
         children: dict[str, list],
         *,
-        lookups: dict[str, list[dict]],
+        lookups: Lookups,
         publisher: str,
     ) -> BaseModel | tuple[BaseModel, dict]: ...
 
@@ -94,6 +100,9 @@ def run_source(
     destination=None,
 ) -> None:
     """Extract + transform a single source end-to-end (no publish)."""
+    # Deferred imports: registry sits below the orchestration layer
+    # (pipeline imports registry), so pull these in lazily.
+    from metadataswiss_connector.pipeline import published_id_lookups
     from metadataswiss_connector.resources import duckdb_destination
 
     destination = destination or duckdb_destination()
@@ -111,4 +120,5 @@ def run_source(
         resources=source.resources,
         destination=destination,
         publisher=effective_publisher,
+        extra_lookups=published_id_lookups(source),
     )

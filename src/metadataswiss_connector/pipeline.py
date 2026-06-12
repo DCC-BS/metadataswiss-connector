@@ -9,11 +9,11 @@ resource at a time.
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 
-from metadataswiss_connector.config import I14YConfig
+from metadataswiss_connector.config import I14YConfig, state_dir
 from metadataswiss_connector.dcat.duckdb_io import read_transformed
+from metadataswiss_connector.dcat.lookups import published_ids_table
 from metadataswiss_connector.dcat.transforms import run_transform_resource
 from metadataswiss_connector.registry import CatalogSource
 from metadataswiss_connector.resources import (
@@ -21,21 +21,16 @@ from metadataswiss_connector.resources import (
     i14y_client_from_env,
     raw_pipeline_for,
 )
-from metadataswiss_connector.sync import SyncResult, sync
+from metadataswiss_connector.sync import SyncResult, active_id_map, sync
 
 logger = logging.getLogger(__name__)
 
 
-# Directory holding the per-resource remote-ID state files. Override via
-# ``CONNECTOR_DATA_DIR`` to put them on a persistent volume in a containerised
-# deployment; defaults to ``data/state/`` in the working directory for local use.
-STATE_DIR = Path(os.environ.get("CONNECTOR_DATA_DIR", "data/state"))
-
-
 def state_path(source_name: str, resource_name: str) -> Path:
-    """One state file per (source, resource) pair."""
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    return STATE_DIR / f"{source_name}_{resource_name}_ids.json"
+    """One state file per (source, resource) pair (under ``config.state_dir()``)."""
+    directory = state_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{source_name}_{resource_name}_ids.json"
 
 
 def extract_source(source: CatalogSource) -> None:
@@ -47,6 +42,33 @@ def extract_source(source: CatalogSource) -> None:
         if not table.startswith("_dlt"):
             logger.info("extracted %s rows into %s", count, table)
     logger.info("%s", load_info)
+
+
+def published_id_lookups(source: CatalogSource) -> dict[str, list[dict]]:
+    """Synthetic lookup tables exposing each resource's published I14Y ids.
+
+    One table per resource of ``source`` (omitted while nothing is
+    published yet), named via ``published_ids_table`` and carrying rows
+    ``{"source_id": ..., "i14y_id": ...}`` from the resource's sync
+    state. Injected into transforms so they can reference already-
+    published sibling records (e.g. a dataservice's ``servesDatasets``)
+    without reading sync state themselves.
+
+    Resolution is against the last *persisted* state: a brand-new
+    dataset+API pair links on the run after the dataset is first
+    published. There is no within-run ordering guarantee between the
+    independent per-resource publish steps anyway, so this is the
+    consistent choice.
+    """
+    lookups: dict[str, list[dict]] = {}
+    for resource_name in source.resources:
+        id_map = active_id_map(state_path(source.name, resource_name))
+        if id_map:
+            lookups[published_ids_table(resource_name)] = [
+                {"source_id": source_id, "i14y_id": i14y_id}
+                for source_id, i14y_id in sorted(id_map.items())
+            ]
+    return lookups
 
 
 def transform_resource(source: CatalogSource, resource_name: str) -> dict:
@@ -65,6 +87,7 @@ def transform_resource(source: CatalogSource, resource_name: str) -> dict:
         spec=spec,
         destination=duckdb_destination(),
         publisher=publisher,
+        extra_lookups=published_id_lookups(source),
     )
 
 

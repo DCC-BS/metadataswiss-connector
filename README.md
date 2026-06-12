@@ -59,7 +59,7 @@ packages/i14y-client/              # Eigenständiger Partner-API-Client (separat
 1. **Paket anlegen** unter `sources/<name>/` mit:
    - `source.py` — dlt source factory (Zero-Arg Callable, das einen `DltSource` zurückgibt)
    - `transform.py` — Pro Resource eine Funktion mit Signatur
-     `transform_fn(record: dict, children: dict[str, list], *, lookups: dict[str, list[dict]], publisher: str) -> BaseModel | tuple[BaseModel, dict]`,
+     `transform_fn(record: dict, children: dict[str, list], *, lookups: Lookups, publisher: str) -> BaseModel | tuple[BaseModel, dict]`,
      die einen Raw-Record auf das passende I14Y-Input-Modell abbildet
      (`DcatDatasetInputModel` für Datasets, `CodeListConceptInput` für Concepts).
      Optionale Sidecar-Payloads (z.B. Code-List-Entries, SHACL-Strukturen) als
@@ -202,6 +202,16 @@ uv run datamodel-codegen \
 ```
 
 Das File ist generiert — nicht von Hand bearbeiten. Kontrakt-Verstöße in `builders.py` oder `transform_to_dataset` werden nach der Regeneration vom Type-Checker bzw. zur Laufzeit von Pydantic gemeldet.
+
+## Tests
+
+Die Unit-Tests decken die reine Transformations-Schicht ab (Dataspot-Record → I14Y-Modell): `dcat/builders.py`, `sources/dataspot/mappings.py` und `sources/dataspot/transform.py`. Diese Funktionen sind ohne Netz/IO testbar, daher muss Dataspot **nicht gemockt** werden — die Eingaben stammen aus versionierten JSON-Fixtures unter `tests/fixtures/`.
+
+```bash
+uv run pytest
+```
+
+Die Extraktions-Schicht (`source.py`/`auth.py`, dlt-REST-API gegen Dataspot) ist bewusst nicht abgedeckt: Ein Mock der gesamten API testet eher dlt als unseren Code und ist wartungsintensiver. Neue Fachlogik in der Transformation sollte mit einem Fixture-basierten Testfall ergänzt werden.
 
 ## Lizenz
 
