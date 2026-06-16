@@ -1,0 +1,45 @@
+name: docs
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install docs dependencies
+        run: uv sync --group docs
+      - name: Mapping docs are up to date
+        run: uv run python scripts/gen_mapping_docs.py --check
+      - name: Build docs site
+        run: uv run mkdocs build --strict
+
+  deploy:
+    # Publishes the built site to the gh-pages branch. One-time setup to serve
+    # it: Settings -> Pages -> Source: "Deploy from a branch" -> gh-pages.
+    # Remove this job if you do not want the site auto-published.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install docs dependencies
+        run: uv sync --group docs
+      - name: Deploy to GitHub Pages
+        run: uv run mkdocs gh-deploy --force
