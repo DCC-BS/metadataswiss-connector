@@ -1,7 +1,7 @@
-"""Unit-Tests für die generischen I14Y-DCAT-Builder (dcat/builders.py).
+"""Unit tests for the generic I14Y DCAT builders (dcat/builders.py).
 
-Reine Funktionen ``loses Primitiv → typisiertes Modell`` — kein Mocking
-nötig, da kein Netz/IO im Spiel ist.
+Pure functions ``loose primitive → typed model`` — no mocking needed,
+since no network/IO is involved.
 """
 
 from datetime import datetime, timezone

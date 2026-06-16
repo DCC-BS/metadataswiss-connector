@@ -7,8 +7,8 @@ from metadataswiss_connector.sources.dataspot.structure import (
     build_dataset_shacl_turtle,
 )
 from metadataswiss_connector.sources.dataspot.constants import (
-    CONCEPT_RESPONSIBLE_DEPUTY_EMAIL,
-    CONCEPT_RESPONSIBLE_PERSON_EMAIL,
+    RESPONSIBLE_DEPUTY_EMAIL,
+    RESPONSIBLE_PERSON_EMAIL,
     CONCEPT_VERSION,
     DATASPOT_VALID_FROM_SENTINEL,
     DATASPOT_VALID_TO_SENTINEL,
@@ -77,6 +77,8 @@ def transform_to_dataset(
         description=dcat.multi_language(dcat.html_to_plain_text(record.get("description"))),
         identifiers=[record["id"]],
         publisher=IdentifierInputModel(identifier=publisher),
+        responsible_person=EmailInputModel(email=RESPONSIBLE_PERSON_EMAIL),
+        responsible_deputy=EmailInputModel(email=RESPONSIBLE_DEPUTY_EMAIL),
         access_rights=CodeInputModel(code="PUBLIC"),
         confidentiality_person=mappings.confidentiality_person(
             children.get("custom_properties__personal_data", [])
@@ -204,6 +206,8 @@ def transform_to_dataservice(
         ),
         identifiers=[record["id"]],
         publisher=IdentifierInputModel(identifier=publisher),
+        responsible_person=EmailInputModel(email=RESPONSIBLE_PERSON_EMAIL),
+        responsible_deputy=EmailInputModel(email=RESPONSIBLE_DEPUTY_EMAIL),
         serves_datasets=_resolve_serves_datasets(record["id"], lookups) or None,
         access_rights=_dataservice_access_rights(record),
         issued=dcat.epoch_ms_to_datetime(
@@ -324,8 +328,8 @@ def transform_to_concept(
             or dcat.multi_language(record.get("label"))
         ),
         publisher=IdentifierInputModel(identifier=publisher),
-        responsible_person=EmailInputModel(email=CONCEPT_RESPONSIBLE_PERSON_EMAIL),
-        responsible_deputy=EmailInputModel(email=CONCEPT_RESPONSIBLE_DEPUTY_EMAIL),
+        responsible_person=EmailInputModel(email=RESPONSIBLE_PERSON_EMAIL),
+        responsible_deputy=EmailInputModel(email=RESPONSIBLE_DEPUTY_EMAIL),
         valid_from=valid_from,
         version=CONCEPT_VERSION,
         code_list_entry_value_type=_value_type_from_entries(raw_entries),

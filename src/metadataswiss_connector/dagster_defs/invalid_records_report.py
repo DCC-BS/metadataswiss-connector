@@ -3,8 +3,8 @@
 Pure data-to-text/HTML transformation, separated from the Dagster
 sensors and SMTP transport in ``email_alerts``: takes the flattened
 ``invalid_details`` dicts collected from the run's materializations and
-produces the German-language mail bodies plus the flat attachment
-report. No Dagster or SMTP imports, so the rendering is unit-testable
+produces the mail bodies plus the flat attachment report. No Dagster or
+SMTP imports, so the rendering is unit-testable
 with plain dicts.
 """
 
@@ -18,7 +18,7 @@ from metadataswiss_connector.config import dataspot_web_base
 # = the record failed local validation against the I14Y contract;
 # ``publish`` = I14Y's API rejected the request. Both are fixed in
 # dataspot, but the distinction tells maintainers where to look.
-_STAGE_LABELS = {"transform": "Validierung", "publish": "I14Y-Publish"}
+_STAGE_LABELS = {"transform": "Validation", "publish": "I14Y publish"}
 
 # dataspot UI path segment per resource kind. Data products (datasets and
 # APIs/dataservices) live under ``datasets``; code-list concepts under
@@ -50,7 +50,7 @@ def _group_heading(stage: str, field: str | None) -> str:
     stage_label = _STAGE_LABELS.get(stage, stage)
     if field:
         return f"{field} ({stage_label})"
-    return f"Record abgelehnt ({stage_label})"
+    return f"Record rejected ({stage_label})"
 
 
 def build_issues(invalid: list[dict]) -> list[dict]:
@@ -82,7 +82,7 @@ def build_issues(invalid: list[dict]) -> list[dict]:
             issues.append({
                 **base,
                 "field": None,
-                "message": row.get("errors") or "(unbekannter Fehler)",
+                "message": row.get("errors") or "(unknown error)",
                 "value": None,
             })
     return issues
@@ -105,29 +105,29 @@ def group_issues(issues: list[dict]) -> list[tuple[tuple[str, str | None], list[
     )
 
 
-def _datensaetze(n: int) -> str:
-    return "1 Datensatz" if n == 1 else f"{n} Datensätze"
+def _records(n: int) -> str:
+    return "1 record" if n == 1 else f"{n} records"
 
 
 def _intro(total_records: int) -> str:
     if total_records == 1:
         return (
-            "1 Datensatz wurde beim Sync nach I14Y übersprungen. Bitte in "
-            "dataspot korrigieren, damit er beim nächsten Lauf publiziert wird."
+            "1 record was skipped during the sync to I14Y. Please correct it "
+            "in dataspot so that it is published on the next run."
         )
     return (
-        f"{total_records} Datensätze wurden beim Sync nach I14Y übersprungen. "
-        "Bitte in dataspot korrigieren, damit sie beim nächsten Lauf publiziert werden."
+        f"{total_records} records were skipped during the sync to I14Y. "
+        "Please correct them in dataspot so that they are published on the next run."
     )
 
 
 def render_text(groups, total_records: int) -> str:
     lines = [_intro(total_records), ""]
     for (stage, field), items in groups:
-        lines.append(f"▌ {_group_heading(stage, field)} — {_datensaetze(len(items))}")
+        lines.append(f"▌ {_group_heading(stage, field)} — {_records(len(items))}")
         for it in items:
-            title = it["title"] or "(ohne Titel)"
-            value = f" → Wert: {it['value']}" if it.get("value") else ""
+            title = it["title"] or "(no title)"
+            value = f" → value: {it['value']}" if it.get("value") else ""
             link = _dataspot_link(it["id"], it.get("kind"))
             link_txt = f"\n     {link}" if link else f"  [{it['id']}]"
             lines.append(f"   • {title} — {it['message']}{value}{link_txt}")
@@ -143,7 +143,7 @@ def render_html(groups, total_records: int) -> str:
         '<table cellpadding="6" cellspacing="0" border="0"'
         ' style="border-collapse:collapse;width:100%;">',
         '<tr style="background:#e8e8e8;text-align:left;">'
-        "<th>Datensatz</th><th>Problem</th><th>Wert</th></tr>",
+        "<th>Record</th><th>Issue</th><th>Value</th></tr>",
     ]
     for (stage, field), items in groups:
         # One section header row spanning the table, then the records.
@@ -153,12 +153,12 @@ def render_html(groups, total_records: int) -> str:
             'padding-top:10px;font-weight:bold;">'
             f"{esc(_group_heading(stage, field))}"
             f' <span style="color:#888;font-weight:normal;">'
-            f"— {_datensaetze(len(items))}</span></td></tr>"
+            f"— {_records(len(items))}</span></td></tr>"
         )
         for it in items:
             rid = esc(str(it["id"]))
             link = _dataspot_link(it["id"], it.get("kind"))
-            title_text = esc(it["title"] or "(ohne Titel)")
+            title_text = esc(it["title"] or "(no title)")
             if link:
                 title_cell = f'<a href="{esc(link)}">{title_text}</a>'
             else:
@@ -185,4 +185,4 @@ def render_attachment(issues: list[dict]) -> str:
         lines.append(f"    field={it.get('field')} value={it.get('value')!r}")
         lines.append(f"    {it['message']}")
         lines.append("")
-    return "\n".join(lines) or "(keine Details)"
+    return "\n".join(lines) or "(no details)"

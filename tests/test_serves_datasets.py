@@ -1,17 +1,17 @@
-"""Tests für die ``servesDatasets``-Verknüpfung von I14Y-DataServices.
+"""Tests for the ``servesDatasets`` link of I14Y DataServices.
 
-Eine Dataspot-API verweist über ``derivedFrom``-Derivationen (Qualifier
-``SPEZ2``) auf die Datasets, die sie produziert. Diese werden zu
-``servesDatasets`` auf dem I14Y-DataService. Der Pfad besteht aus drei
-Schichten, die hier je isoliert getestet werden:
+A Dataspot API references the datasets it produces via ``derivedFrom``
+derivations (qualifier ``SPEZ2``). These become ``servesDatasets`` on the
+I14Y DataService. The path consists of three layers, each tested in
+isolation here:
 
-* ``DataspotEnrichment.fetch_derived_dataset_ids`` — filtert die
-  Derivationen auf ``SPEZ2`` und liefert die Dataspot-Dataset-IDs,
-* ``pipeline.published_id_lookups`` — liest die Sync-State-Dateien und
-  injiziert pro Resource eine ``published_ids_*``-Lookup-Tabelle
-  (Dataspot-ID → I14Y-UUID) in den Transform,
+* ``DataspotEnrichment.fetch_derived_dataset_ids`` — filters the
+  derivations to ``SPEZ2`` and returns the Dataspot dataset IDs,
+* ``pipeline.published_id_lookups`` — reads the sync state files and
+  injects a ``published_ids_*`` lookup table per resource
+  (Dataspot ID → I14Y UUID) into the transform,
 * ``transform._resolve_serves_datasets`` / ``transform_to_dataservice``
-  — fügt beides zusammen und baut die ``IdModel``-Liste.
+  — combines both and builds the ``IdModel`` list.
 """
 
 import json
@@ -24,13 +24,13 @@ from metadataswiss_connector.sources.dataspot.enrichment import DataspotEnrichme
 
 PUBLISHER = "Basel-Stadt"
 
-# Stabile Beispiel-UUIDs (entsprechen dem Format der I14Y-Registrierungen).
+# Stable example UUIDs (match the format of the I14Y registrations).
 UUID_A = "a4b0f459-326b-4703-96dc-4f55fbcf225c"
 UUID_B = "22222222-2222-2222-2222-222222222222"
 UUID_Z = "11111111-1111-1111-1111-111111111111"
 
 
-# --- Schicht 1: SPEZ2-Derivationen aus Dataspot -------------------------
+# --- Layer 1: SPEZ2 derivations from Dataspot ---------------------------
 
 
 class _FakeResponse:
@@ -42,7 +42,7 @@ class _FakeResponse:
 
 
 class _FakeClient:
-    """Minimaler RESTClient-Ersatz: liefert eine feste Payload oder wirft."""
+    """Minimal RESTClient replacement: returns a fixed payload or raises."""
 
     def __init__(self, payload=None, error=None):
         self._payload = payload
@@ -75,17 +75,17 @@ class TestFetchDerivedDatasetIds:
             "_embedded": {
                 "derivedFrom": [
                     {"derivedFrom": "ds-a", "qualifier": q},
-                    # Andere Qualifier sind keine "produziert"-Relation.
+                    # Other qualifiers are not a "produces" relation.
                     {"derivedFrom": "ds-other", "qualifier": "SPEZ1"},
                     {"derivedFrom": "ds-c", "qualifier": q},
-                    # SPEZ2 ohne Ziel-ID wird übersprungen.
+                    # SPEZ2 without a target ID is skipped.
                     {"qualifier": q},
                 ]
             }
         }
         enrichment, client = _enrichment(payload=payload)
         assert enrichment.fetch_derived_dataset_ids("api-1") == ["ds-a", "ds-c"]
-        # Korrekter Endpunkt wurde angefragt.
+        # The correct endpoint was requested.
         assert client.calls == ["/rest/db/datasets/api-1/derivedFrom"]
 
     def test_no_derivations_returns_empty(self):
@@ -97,26 +97,26 @@ class TestFetchDerivedDatasetIds:
         assert enrichment.fetch_derived_dataset_ids("api-1") == []
 
     def test_fetch_error_is_swallowed_and_cached(self):
-        # Ein Fehler darf den Lauf nicht abbrechen; das Ergebnis (kein Link)
-        # wird gecacht, sodass nicht erneut angefragt wird.
+        # An error must not abort the run; the result (no link) is cached so
+        # that no further request is made.
         enrichment, client = _enrichment(error=RuntimeError("boom"))
         assert enrichment.fetch_derived_dataset_ids("api-1") == []
         assert enrichment.fetch_derived_dataset_ids("api-1") == []
         assert len(client.calls) == 1
 
 
-# --- Schicht 2: Dataspot-ID → I14Y-UUID aus dem Sync-State --------------
+# --- Layer 2: Dataspot ID → I14Y UUID from the sync state ---------------
 
 
 def _published_ids(rows: list[dict]) -> dict[str, list[dict]]:
-    """Lookup-Tabelle, wie sie ``pipeline.published_id_lookups`` injiziert."""
+    """Lookup table as injected by ``pipeline.published_id_lookups``."""
     return {"published_ids_data_products": rows}
 
 
 class TestPublishedIdLookups:
     @staticmethod
     def _patch_state_dir(monkeypatch, state_dir):
-        # ``config.state_dir()`` liest die Env-Variable bei jedem Aufruf.
+        # ``config.state_dir()`` reads the env variable on every call.
         monkeypatch.setenv("CONNECTOR_DATA_DIR", str(state_dir))
 
     def test_maps_active_entries_and_excludes_deleted(self, monkeypatch, tmp_path):
@@ -128,9 +128,9 @@ class TestPublishedIdLookups:
             json.dumps(
                 {
                     "ds-1": {"id": UUID_A, "payload_hash": "h"},
-                    # Soft-deleted -> nicht mehr referenzierbar.
+                    # Soft-deleted -> no longer referenceable.
                     "ds-2": {"id": UUID_B, "deleted_at": "2026-01-01T00:00:00Z"},
-                    # Ohne I14Y-id (noch nicht publiziert) -> ausgelassen.
+                    # Without an I14Y id (not yet published) -> left out.
                     "ds-3": {"payload_hash": "h"},
                 }
             )
@@ -146,7 +146,7 @@ class TestPublishedIdLookups:
         assert published_id_lookups(dataspot_catalog_source) == {}
 
 
-# --- Schicht 3: Auflösung + Gesamttransformation ------------------------
+# --- Layer 3: Resolution + full transformation --------------------------
 
 
 class TestResolveServesDatasets:
@@ -157,9 +157,9 @@ class TestResolveServesDatasets:
         lookups = Lookups({
             "dataservice_serves_datasets": [
                 {"dataservice_id": "api-1", "dataset_id": "ds-pub"},
-                # Noch nicht publiziert (nicht im Map) -> übersprungen.
+                # Not yet published (not in the map) -> skipped.
                 {"dataservice_id": "api-1", "dataset_id": "ds-unpub"},
-                # Gehört zu einer anderen API -> ignoriert.
+                # Belongs to a different API -> ignored.
                 {"dataservice_id": "api-2", "dataset_id": "ds-pub"},
             ],
             **_published_ids([{"source_id": "ds-pub", "i14y_id": UUID_A}]),
@@ -168,8 +168,8 @@ class TestResolveServesDatasets:
         assert [str(r.id) for r in result] == [UUID_A]
 
     def test_deterministic_order_by_dataspot_id(self):
-        # Reihenfolge nach Dataspot-ID, unabhängig von der Lookup-Reihenfolge,
-        # damit der Payload-Hash stabil bleibt.
+        # Ordered by Dataspot ID, independent of the lookup order, so that
+        # the payload hash stays stable.
         lookups = Lookups({
             "dataservice_serves_datasets": [
                 {"dataservice_id": "api-1", "dataset_id": "ds-zebra"},
@@ -201,8 +201,8 @@ class TestTransformToDataserviceServesDatasets:
         assert dumped["servesDatasets"] == [{"id": UUID_A}]
 
     def test_no_link_omits_field(self):
-        # Keine passende Zeile -> servesDatasets bleibt None und fällt aus
-        # dem Payload (exclude_none) heraus.
+        # No matching row -> servesDatasets stays None and drops out of the
+        # payload (exclude_none).
         record = {"id": "api-1", "label": "Tiefbau API", "description": "x"}
         lookups = Lookups({
             "dataservice_serves_datasets": [

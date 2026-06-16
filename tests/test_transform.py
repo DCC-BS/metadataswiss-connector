@@ -1,8 +1,8 @@
-"""Unit-Tests für die Dataspot→I14Y-Transformation (transform.py).
+"""Unit tests for the Dataspot→I14Y transformation (transform.py).
 
-Getestet wird die reine Abbildung ``flacher Record + Children + Lookups
-→ I14Y-InputModel``. Die Eingaben stammen aus versionierten JSON-Fixtures
-(``tests/fixtures/``), sodass Dataspot nicht angesprochen werden muss.
+Tests the pure mapping ``flat record + children + lookups
+→ I14Y input model``. The inputs come from versioned JSON fixtures
+(``tests/fixtures/``), so Dataspot does not need to be contacted.
 """
 
 from metadataswiss_connector.dcat.lookups import Lookups
@@ -30,20 +30,25 @@ class TestTransformToDataset:
         )
 
     def test_returns_model_without_structure(self, load_fixture):
-        # Keine structure-components -> nur das Modell, kein Tupel.
+        # No structure components -> just the model, not a tuple.
         result = self._build(load_fixture)
         assert isinstance(result, DcatDatasetInputModel)
 
     def test_core_fields(self, load_fixture):
         ds = self._build(load_fixture)
         assert ds.title.de == "Wohnbevölkerung nach Alter"
-        # HTML wird zu Klartext.
+        # HTML is converted to plain text.
         assert ds.description.de == "Jährliche Wohnbevölkerung des Kantons."
         assert ds.identifiers == ["ds-001"]
         assert ds.publisher.identifier == PUBLISHER
         assert ds.access_rights.code == "PUBLIC"
         assert ds.version == "1.2.0"
         assert ds.version_notes.de == "Korrektur der Altersklassen"
+
+    def test_responsible_contacts_from_constants(self, load_fixture):
+        ds = self._build(load_fixture)
+        assert ds.responsible_person.email == constants.RESPONSIBLE_PERSON_EMAIL
+        assert ds.responsible_deputy.email == constants.RESPONSIBLE_DEPUTY_EMAIL
 
     def test_keywords_and_themes(self, load_fixture):
         ds = self._build(load_fixture)
@@ -52,16 +57,16 @@ class TestTransformToDataset:
         assert [c.code for c in ds.themes] == ["117", "106"]
 
     def test_confidentiality_strongest_wins(self, load_fixture):
-        # natural_person schlägt none.
+        # natural_person beats none.
         ds = self._build(load_fixture)
         assert ds.confidentiality_person.code == "person"
 
     def test_distributions_sorted_by_id_and_filtered(self, load_fixture):
         ds = self._build(load_fixture)
-        # dist-c hat keine access_url -> herausgefiltert; Rest nach id sortiert.
+        # dist-c has no access_url -> filtered out; the rest sorted by id.
         ids = [d.identifier for d in ds.distributions]
         assert ids == ["dist-a", "dist-b"]
-        # Fehlende Distribution-Beschreibung fällt auf den Titel zurück.
+        # Missing distribution description falls back to the title.
         json_dist = next(d for d in ds.distributions if d.identifier == "dist-a")
         assert json_dist.description.de == "JSON-Export"
         assert json_dist.format.code == "JSON"
@@ -87,8 +92,8 @@ class TestTransformToDataset:
 
 class TestTransformToDatasetEdgeCases:
     def test_minimal_record(self):
-        # Nur die Pflichtfelder; alle optionalen Quellen leer. description ist
-        # im I14Y-Modell zwingend, daher hier gesetzt.
+        # Only the required fields; all optional sources empty. description is
+        # mandatory in the I14Y model, so it is set here.
         record = {"id": "ds-min", "label": "Minimal", "description": "Beschreibung"}
         ds = transform.transform_to_dataset(
             record, {}, lookups=Lookups(), publisher=PUBLISHER
@@ -100,8 +105,8 @@ class TestTransformToDatasetEdgeCases:
         assert ds.data_owner is None
 
     def test_data_owner_depth_tie_broken_by_collection_id(self):
-        # Zwei Owner auf gleicher Tiefe -> kleinste collection_id gewinnt
-        # (deterministischer Hash).
+        # Two owners at the same depth -> smallest collection_id wins
+        # (deterministic hash).
         record = {"id": "ds-tie", "label": "Tie", "description": "x"}
         lookups = {
             "dataset_collection_path": [
@@ -137,14 +142,14 @@ class TestTransformToDatasetWithStructure:
     def test_structure_contains_attribute_paths(self, load_fixture):
         _, extras = self._build(load_fixture)
         ttl = extras["structure"]
-        # Beide eigenen Attribute, aber nicht das zu ds-other gehörende.
+        # Both of its own attributes, but not the one belonging to ds-other.
         assert "attributes/attr-jahr" in ttl
         assert "attributes/attr-geschlecht" in ttl
         assert "attr-fremd" not in ttl
 
     def test_enumeration_component_conforms_to_concept(self, load_fixture):
         _, extras = self._build(load_fixture)
-        # ReferenceObject + datatype_id -> conformsTo auf I14Y-Concept-IRI.
+        # ReferenceObject + datatype_id -> conformsTo on the I14Y concept IRI.
         assert "concept-001" in extras["structure"]
 
 
@@ -162,6 +167,11 @@ class TestTransformToDataservice:
         assert svc.description.de == "REST-Schnittstelle zur Wohnbevölkerung."
         assert svc.identifiers == ["api-001"]
         assert svc.access_rights.code == "PUBLIC"
+
+    def test_responsible_contacts_from_constants(self, load_fixture):
+        svc = self._build(load_fixture)
+        assert svc.responsible_person.email == constants.RESPONSIBLE_PERSON_EMAIL
+        assert svc.responsible_deputy.email == constants.RESPONSIBLE_DEPUTY_EMAIL
 
     def test_endpoint_url_from_scalar(self, load_fixture):
         svc = self._build(load_fixture)
@@ -181,8 +191,8 @@ class TestTransformToDataservice:
         assert svc.contact_points[0].has_email == "statistik@bs.ch"
 
     def test_no_serves_datasets_when_lookup_empty(self, load_fixture):
-        # Ohne dataservice_serves_datasets-Zeilen kein servesDatasets
-        # (und kein Zugriff auf den Sync-State).
+        # Without dataservice_serves_datasets rows there is no servesDatasets
+        # (and no access to the sync state).
         svc = self._build(load_fixture)
         assert svc.serves_datasets is None
 
@@ -205,17 +215,17 @@ class TestTransformToConcept:
         assert model.name.de == "Geschlecht"
         assert model.description.de == "Codeliste der Geschlechter."
         assert model.version == constants.CONCEPT_VERSION
-        # Codes "1", "2", "2.1" sind alle numerisch parsebar; der codelose
-        # Eintrag e4 wird (wie in den Entries) ignoriert und erzwingt
-        # daher kein String.
+        # Codes "1", "2", "2.1" are all numerically parsable; the codeless
+        # entry e4 is ignored (as in the entries) and therefore does not
+        # force a string type.
         assert model.code_list_entry_value_type == CodeListEntryValueType.numeric
-        # Längster Code "2.1" -> 3.
+        # Longest code "2.1" -> 3.
         assert model.code_list_entry_value_max_length == 3
 
     def test_entries_skip_missing_code_and_resolve_parent(self, load_fixture):
         _, extras = self._build(load_fixture)
         entries = {e["code"]: e for e in extras["entries"]}
-        # Eintrag e4 ohne Code wird übersprungen.
+        # Entry e4 without a code is skipped.
         assert set(entries) == {"1", "2", "2.1"}
         assert entries["2.1"]["parentCode"] == "2"
         assert entries["1"]["name"] == {"de": "männlich"}
@@ -223,11 +233,11 @@ class TestTransformToConcept:
     def test_entry_validity_sentinels_dropped(self, load_fixture):
         _, extras = self._build(load_fixture)
         entries = {e["code"]: e for e in extras["entries"]}
-        # valid_to ist der 3000-01-01-Sentinel -> weggelassen.
+        # valid_to is the 3000-01-01 sentinel -> omitted.
         assert "validTo" not in entries["1"]
-        # valid_from von e2 ist der 1900-01-01-Sentinel -> weggelassen.
+        # valid_from of e2 is the 1900-01-01 sentinel -> omitted.
         assert "validFrom" not in entries["2"]
-        # valid_from von e1 ist real -> vorhanden.
+        # valid_from of e1 is real -> present.
         assert "validFrom" in entries["1"]
 
 
@@ -272,7 +282,7 @@ class TestValueTypeInference:
         assert transform._value_type_from_entries(raw) == CodeListEntryValueType.string
 
     def test_codeless_entries_ignored(self):
-        # Einträge ohne Code dürfen einen sonst numerischen Typ nicht kippen.
+        # Codeless entries must not flip an otherwise numeric type.
         raw = [{"code": "1"}, {"code": None}, {"code": ""}, {"code": "2"}]
         assert transform._value_type_from_entries(raw) == CodeListEntryValueType.numeric
 
