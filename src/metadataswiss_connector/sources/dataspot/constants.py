@@ -58,11 +58,12 @@ DATASPOT_VALID_FROM_SENTINEL = -2208988800000  # 1900-01-01 UTC
 DATASPOT_VALID_TO_SENTINEL = 32503593600000    # 3000-01-01 UTC
 
 # Fixed contacts used for responsiblePerson / responsibleDeputy on every
-# code-list concept. Dataspot enumerations expose no stable contact field,
-# so we publish deployment-wide constants rather than deriving them per
-# record. Required from the environment.
-CONCEPT_RESPONSIBLE_PERSON_EMAIL = os.environ["CONCEPT_RESPONSIBLE_PERSON_EMAIL"]
-CONCEPT_RESPONSIBLE_DEPUTY_EMAIL = os.environ["CONCEPT_RESPONSIBLE_DEPUTY_EMAIL"]
+# code-list concept, dataset and dataservice. Dataspot exposes no stable
+# per-record contact field for these, so we publish deployment-wide
+# constants rather than deriving them per record. Required from the
+# environment.
+RESPONSIBLE_PERSON_EMAIL = os.environ["RESPONSIBLE_PERSON_EMAIL"]
+RESPONSIBLE_DEPUTY_EMAIL = os.environ["RESPONSIBLE_DEPUTY_EMAIL"]
 
 # Version string used for every code-list concept.
 CONCEPT_VERSION = "1.0.0"

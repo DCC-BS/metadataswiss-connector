@@ -1,9 +1,9 @@
-"""Gemeinsame Test-Fixtures.
+"""Shared test fixtures.
 
-``load_fixture`` lädt aufgezeichnete Dataspot-Beispiel-Records aus
-``tests/fixtures/*.json``. Diese Dateien sind die im Repository
-abgelegten Testfälle — bewusst versioniert, damit sich nachvollziehen
-lässt, gegen welche Eingaben die Transformation getestet wird.
+``load_fixture`` loads recorded Dataspot example records from
+``tests/fixtures/*.json``. These files are the test cases stored in the
+repository — deliberately versioned so that it stays traceable which
+inputs the transformation is tested against.
 """
 
 import json
@@ -19,7 +19,7 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures"
 @pytest.fixture
 def load_fixture():
     def _load(name: str) -> dict:
-        with open(FIXTURE_DIR / name) as f:
+        with open(FIXTURE_DIR / name, encoding="utf-8") as f:
             fx = json.load(f)
         # Transforms receive lookups as the per-run Lookups view, not as
         # the raw dict the fixture stores.

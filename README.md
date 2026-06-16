@@ -1,80 +1,86 @@
 # metadataswiss-connector
 
-Connector zur Extraktion von Metadaten aus Datenkatalogen, Transformation in das [DCAT-AP-CH](https://www.i14y.admin.ch/)-Format und Publikation auf die [Interoperabilitätsplattform I14Y](https://www.i14y.admin.ch/) des Bundes.
+Connector for extracting metadata from data catalogs, transforming it into the [DCAT-AP-CH](https://www.i14y.admin.ch/) format and publishing it to the federal [Interoperability Platform I14Y](https://www.i14y.admin.ch/).
 
-## Architektur
+## Architecture
 
-Die Pipeline folgt einem ELT-Pattern mit drei Schritten, jeweils basierend auf [dlt](https://dlthub.com/):
+The pipeline follows an ELT pattern with three steps, each based on [dlt](https://dlthub.com/):
 
-1. **Extract + Load** (`extract`): Rohdaten werden via dlt aus dem Quellkatalog extrahiert und in eine lokale DuckDB geladen.
-2. **Transform** (`transform`): Die Rohdaten werden in das I14Y-kompatible DCAT-Format transformiert und in ein separates Dataset geschrieben.
-3. **Publish** (`publish`): Die transformierten Records werden gegen die I14Y Partner API synchronisiert (create/update/delete), mit einer per-Source State-Datei zur Nachverfolgung der remote IDs.
+1. **Extract + Load** (`extract`): Raw data is extracted from the source catalog via dlt and loaded into a local DuckDB.
+2. **Transform** (`transform`): The raw data is transformed into the I14Y-compatible DCAT format and written to a separate dataset.
+3. **Publish** (`publish`): The transformed records are synchronized against the I14Y Partner API (create/update/delete), using a per-source state file to track the remote IDs.
 
 ```
-Quellkatalog → [extract] → [transform] → [publish] → I14Y API
+Source catalog → [extract] → [transform] → [publish] → I14Y API
 ```
 
-Die Schritte können sowohl über die mitgelieferte CLI als auch über [Dagster](https://dagster.io/) ausgeführt werden (siehe Abschnitt [Dagster](#dagster) weiter unten). `registry.py`, `config.py`, `sources/` und `dcat/` bleiben framework-frei — weitere Orchestratoren (Airflow o.ä.) sind dadurch problemlos anbindbar.
+The steps are orchestrated via [Dagster](https://dagster.io/) (see the [Running the pipeline](#running-the-pipeline) section below), but the underlying logic is framework-free: `pipeline.py`, `registry.py`, `config.py`, `sources/` and `dcat/` have no Dagster dependency, so additional orchestrators (Airflow or similar) can drive the same `extract`/`transform`/`publish` helpers without issue.
 
-### Plugin-Architektur
+### Plugin architecture
 
-Katalogquellen werden als framework-freie `CatalogSource`-Descriptoren registriert. Dagster iteriert über die Liste in `sources/__init__.py` und materialisiert pro Source die gewünschten Assets.
+Catalog sources are registered as framework-free `CatalogSource` descriptors. Dagster iterates over the list in `sources/__init__.py` and materializes the desired assets per source.
 
-### Projektstruktur
+### Project structure
 
 ```
 src/metadataswiss_connector/
 ├── registry.py                    # CatalogSource, ResourceSpec, TransformFn
 ├── config.py                      # I14YConfig
-├── resources.py                   # dlt-Pipeline-Helper + I14Y-Client-Factory
-├── sync.py                        # I14Y Create/Update/Delete Reconciliation
-│                                  #   (sync/purge mit kind-Dispatch)
+├── resources.py                   # dlt pipeline helpers + I14Y client factory
+├── sync.py                        # I14Y create/update/delete reconciliation
+│                                  #   (sync/purge with kind dispatch)
 ├── sources/
-│   ├── __init__.py                # SOURCES — Liste aller registrierten Quellen
+│   ├── __init__.py                # SOURCES — list of all registered sources
 │   └── dataspot/
 │       ├── __init__.py            # dataspot_catalog_source (CatalogSource)
-│       ├── auth.py                # Azure AD OAuth2 + Dataspot Access Key
-│       ├── source.py              # REST API Source Definition (dlt)
-│       ├── transform.py           # Feld-Mapping Dataspot → DCAT / Concept
-│       ├── mappings.py            # Kontrollierte Vokabulare (Themen, Frequenz, …)
-│       ├── enrichment.py          # Staatskalender-Lookup, Data-Owner-Resolver
-│       ├── structure.py           # SHACL-Turtle-Generator für Dataset-Struktur
-│       └── constants.py           # Konstanten + TRANSFORM_VERSION
-├── pipeline.py                   # Framework-freie extract/transform/publish-Helper
-├── dagster_defs/                 # Dagster-Entrypoint (Assets + Jobs pro Source)
-│   ├── __init__.py               #   exportiert `defs: Definitions`
-│   ├── assets.py                 #   Asset-Factory pro CatalogSource
-│   ├── email_alerts.py           #   Run-Failure-Sensor (Email)
-│   └── purge_jobs.py             #   Purge-Job-Factory pro CatalogSource
+│       ├── auth.py                # Azure AD OAuth2 + Dataspot access key
+│       ├── source.py              # REST API source definition (dlt)
+│       ├── transform.py           # Field mapping Dataspot → DCAT / Concept
+│       ├── mappings.py            # Controlled vocabularies (themes, frequency, …)
+│       ├── enrichment.py          # Staatskalender lookup, data-owner resolver
+│       ├── structure.py           # Dataspot structure rows → StructureComponent adapter
+│       └── constants.py           # Constants + TRANSFORM_VERSION
+├── pipeline.py                   # Framework-free extract/transform/publish helpers
+├── dagster_defs/                 # Dagster entrypoint (assets + jobs per source)
+│   ├── __init__.py               #   exports `defs: Definitions`
+│   ├── assets.py                 #   asset factory per CatalogSource
+│   ├── schedules.py              #   full_sync_schedule (one job per source)
+│   ├── email_alerts.py           #   run-failure + invalid-records sensors (email)
+│   ├── invalid_records_report.py #   invalid-records alert email rendering
+│   └── purge_jobs.py             #   purge-job factory per CatalogSource
 └── dcat/
-    ├── builders.py                # I14Y DCAT-Modell-Builder
-    ├── transforms.py              # Raw→DCAT Transform-Pipeline-Schritt
-    └── i14y_models.py             # Generierte Pydantic-Modelle aus I14Y OpenAPI-Spec
+    ├── builders.py                # I14Y DCAT model builder
+    ├── transforms.py              # Raw→DCAT transform pipeline step
+    ├── duckdb_io.py               # DuckDB read-path for transformed records
+    ├── dlt_schema.py              # dlt-schema introspection + re-nesting over DuckDB
+    ├── lookups.py                 # Cross-reference lookup tables for a transform run
+    ├── shacl.py                   # Source-neutral SHACL/Turtle builder (dataset structure)
+    └── i14y_models.py             # Generated Pydantic models from the I14Y OpenAPI spec
 
-packages/i14y-client/              # Eigenständiger Partner-API-Client (separates Paket)
+packages/i14y-client/              # Standalone Partner API client (separate package)
 ```
 
-### Neue Quelle anbinden
+### Connecting a new source
 
-1. **Paket anlegen** unter `sources/<name>/` mit:
-   - `source.py` — dlt source factory (Zero-Arg Callable, das einen `DltSource` zurückgibt)
-   - `transform.py` — Pro Resource eine Funktion mit Signatur
+1. **Create a package** under `sources/<name>/` with:
+   - `source.py` — dlt source factory (zero-arg callable returning a `DltSource`)
+   - `transform.py` — one function per resource with the signature
      `transform_fn(record: dict, children: dict[str, list], *, lookups: Lookups, publisher: str) -> BaseModel | tuple[BaseModel, dict]`,
-     die einen Raw-Record auf das passende I14Y-Input-Modell abbildet
-     (`DcatDatasetInputModel` für Datasets, `CodeListConceptInput` für Concepts).
-     Optionale Sidecar-Payloads (z.B. Code-List-Entries, SHACL-Strukturen) als
-     zweites Tuple-Element zurückgeben — sync ruft sie nach Create/Update als
-     Follow-up via `apply_extras` auf.
-   - `__init__.py` — `CatalogSource(name=..., dlt_source_factory=..., resources={<resource>: ResourceSpec(transform_fn, kind="dataset"|"concept")}, transform_version=...)` instanziieren und exportieren
-2. **Registrieren** in `sources/__init__.py`: den `CatalogSource` an `SOURCES` anhängen.
+     which maps a raw record onto the appropriate I14Y input model
+     (`DcatDatasetInputModel` for datasets, `CodeListConceptInput` for concepts).
+     Return optional sidecar payloads (e.g. code-list entries, SHACL structures) as
+     the second tuple element — sync invokes them after create/update as a
+     follow-up via `apply_extras`.
+   - `__init__.py` — instantiate and export `CatalogSource(name=..., dlt_source_factory=..., resources={<resource>: ResourceSpec(transform_fn, kind="dataset"|"concept")}, transform_version=...)`
+2. **Register** it in `sources/__init__.py`: append the `CatalogSource` to `SOURCES`.
 
-Wird die Transform-Logik einer existierenden Source verändert, sollte `transform_version` erhöht werden. Records mit abweichender persistierter Version werden beim nächsten Sync re-published, auch ohne neues `modified`-Datum aus der Quelle.
+When the transform logic of an existing source changes, `transform_version` should be incremented. Records with a differing persisted version are re-published on the next sync, even without a new `modified` date from the source.
 
-## Unterstützte Quellen
+## Supported sources
 
-- **Dataspot** — Extraktion von Datenprodukten via REST API (z.B. [Datenkatalog Basel-Stadt](https://datenkatalog.bs.ch))
+- **Dataspot** — extraction of data products via REST API (e.g. [Datenkatalog Basel-Stadt](https://datenkatalog.bs.ch))
 
-## Voraussetzungen
+## Requirements
 
 - Python >= 3.14
 - [uv](https://docs.astral.sh/uv/)
@@ -85,18 +91,33 @@ Wird die Transform-Logik einer existierenden Source verändert, sollte `transfor
 uv sync
 ```
 
-### Konfiguration
+### Configuration
 
-Sämtliche Konfiguration läuft über `.env` (siehe `.env.example` als Vorlage).
-`.env` wird beim Import des Pakets automatisch geladen.
+All configuration runs through `.env` (see `.env.example` as a template).
+`.env` is loaded automatically when the package is imported.
 
-Dataspot-Verbindung. dlt löst diese Werte über das `SOURCES__DATASPOT__*`
-Env-Naming auf (doppelter Unterstrich pro TOML-Ebene):
+**I14Y Partner API** (publishing target). `I14Y_PUBLISHER_IDENTIFIER` is the
+organisation under which records are published; `I14Y_USER_AGENT` is sent on
+every request:
+
+```bash
+I14Y_BASE_URL=https://api-a.i14y.admin.ch/api/partner/v1
+I14Y_TOKEN_URL=https://identity.i14y.a.c.bfs.admin.ch/realms/bfs-sis-a/protocol/openid-connect/token
+I14Y_IRI_BASE=https://iri.i14y.a.c.bfs.admin.ch/concept
+I14Y_PUBLISHER_IDENTIFIER=CH_KT_BS
+I14Y_USER_AGENT=metadataswiss-connector/0.1.0 (Statistisches Amt Basel-Stadt; contact: statistik@bs.ch)
+# Secrets — never commit:
+I14Y_CLIENT_ID=
+I14Y_CLIENT_SECRET=
+```
+
+**Dataspot source connection.** dlt resolves these values via the
+`SOURCES__DATASPOT__*` env naming (double underscore per TOML level):
 
 ```bash
 SOURCES__DATASPOT__BASE_URL=https://datenkatalog.bs.ch
 SOURCES__DATASPOT__DATABASE_NAME=prod
-# Secrets — nie committen:
+# Secrets — never commit:
 SOURCES__DATASPOT__TENANT_ID=
 SOURCES__DATASPOT__CLIENT_ID=
 SOURCES__DATASPOT__CLIENT_SECRET=
@@ -104,65 +125,77 @@ SOURCES__DATASPOT__DATASPOT_ACCESS_KEY=
 SOURCES__DATASPOT__EXPOSED_CLIENT_ID=
 ```
 
-## Pipeline starten
-
-Die Pipeline wird über Dagster orchestriert. Pro registrierter Quelle und Resource werden Assets generiert (`<source>_raw → <source>_<resource>_transformed → <source>_<resource>_published`), so dass sich einzelne Schritte gezielt re-materialisieren lassen und die Lineage in der UI sichtbar ist.
+**Dataspot enrichment** (deployment-specific, no fallback — all required):
 
 ```bash
-# Dagster-UI starten (Default: http://localhost:3000)
+# Role UUID of the "data owner" attribution in Dataspot (tenant-specific)
+DATA_OWNER_ROLE_UUID=02222f05-5690-4cb8-8d90-c27ca57e98e9
+# Staatskalender API — enriches organisational units with contact data
+STAATSKALENDER_BASE_URL=https://staatskalender.bs.ch/api
+# Fixed contacts for responsiblePerson / responsibleDeputy on every code-list concept, dataset and dataservice
+RESPONSIBLE_PERSON_EMAIL=email@example.com
+RESPONSIBLE_DEPUTY_EMAIL=email@example.com
+```
+
+## Running the pipeline
+
+The pipeline is orchestrated via Dagster. Assets are generated per registered source and resource (`<source>_raw → <source>_<resource>_transformed → <source>_<resource>_published`), so that individual steps can be re-materialized in a targeted manner and the lineage is visible in the UI.
+
+```bash
+# Start the Dagster UI (default: http://localhost:3000)
 uv run dagster dev
 ```
 
-Das Modul `metadataswiss_connector.dagster_defs` wird über `[tool.dagster]` in `pyproject.toml` automatisch von `dagster dev` geladen. Ein `full_sync_schedule` (täglich 03:00, Zeitzone `Europe/Zurich`, konfigurierbar über `CONNECTOR_SYNC_CRON` / `CONNECTOR_SYNC_TIMEZONE`) ist registriert, startet aber **gestoppt** — er muss in der Dagster-UI unter *Automation* bewusst aktiviert werden.
+The `metadataswiss_connector.dagster_defs` module is loaded automatically by `dagster dev` via `[tool.dagster]` in `pyproject.toml`. A `full_sync_schedule` (daily 03:00, timezone `Europe/Zurich`, configurable via `CONNECTOR_SYNC_CRON` / `CONNECTOR_SYNC_TIMEZONE`) is registered but starts **stopped** — it must be deliberately enabled in the Dagster UI under *Automation*.
 
 ## Deployment (Docker Compose)
 
-Für den Produktivbetrieb liegt ein Compose-Setup mit vier Services bei: `postgres` (Dagster-Storage), `connector_code` (gRPC-Code-Server — **hier laufen alle Runs**, deshalb hängt das persistente Daten-Volume an diesem Container), `webserver` (UI auf Port 3000) und `daemon` (Schedules, Run-Queue, Sensoren).
+For production operation a Compose setup with four services is included: `postgres` (Dagster storage), `connector_code` (gRPC code server — **all runs execute here**, which is why the persistent data volume is attached to this container), `webserver` (UI on port 3000) and `daemon` (schedules, run queue, sensors).
 
 ```bash
-# 1. .env mit den PRODUKTIV-Credentials befüllen (siehe .env.example)
+# 1. Populate .env with the PRODUCTION credentials (see .env.example)
 cp .env.example .env && $EDITOR .env
 
-# 2. Bauen und starten
+# 2. Build and start
 docker compose up -d --build
 
-# 3. UI öffnen
+# 3. Open the UI
 open http://localhost:3000
 ```
 
-Persistenz:
-- **Dagster-Metadaten** liegen im benannten Volume `postgres_data`.
-- **Connector-State** (DuckDB-Warehouse + I14Y-State-Files) liegt per **Bind Mount** auf dem Host — der Container nutzt damit dieselben Dateien wie ein lokales `dagster dev`. Die Host-Pfade sind über `.env` konfigurierbar:
-  - `HOST_STATE_DIR` (Default `./data`) → im Container `/mnt/state` (`CONNECTOR_DATA_DIR`)
-  - `HOST_DUCKDB_DIR` (Default `.`, Repo-Root) + `DUCKDB_FILENAME` (Default `metadata.duckdb`) → im Container `/mnt/duckdb/<file>` (`DUCKDB_PATH`)
+Persistence:
+- **Dagster metadata** resides in the named volume `postgres_data`.
+- **Connector state** (DuckDB warehouse + I14Y state files) resides via a **bind mount** on the host — the container thus uses the same files as a local `dagster dev`. The host paths are configurable via `.env`:
+  - `HOST_STATE_DIR` (default `./data/state`) → `/mnt/state` in the container (`CONNECTOR_DATA_DIR`)
+  - `HOST_DUCKDB_DIR` (default `.`, repo root) + `DUCKDB_FILENAME` (default `metadata.duckdb`) → `/mnt/duckdb/<file>` in the container (`DUCKDB_PATH`)
 
-Die App-Secrets kommen aus `.env`; Postgres-Credentials lassen sich über `DAGSTER_PG_*` überschreiben.
+The app secrets come from `.env`; Postgres credentials can be overridden via `DAGSTER_PG_*`.
 
-> **Umgebungswechsel (Abnahme → Prod):** Die State-Files mappen Source-IDs auf I14Y-UUIDs einer *bestimmten* Umgebung. Beim Wechsel `HOST_STATE_DIR` (und ggf. `HOST_DUCKDB_DIR`) auf ein **leeres, prod-eigenes** Verzeichnis zeigen lassen — niemals die Abnahme-State-Files wiederverwenden, sonst versucht der Sync, in Prod nicht existierende UUIDs zu aktualisieren/löschen.
+> **Switching environments (acceptance → prod):** The state files map source IDs to I14Y UUIDs of a *specific* environment. When switching, point `HOST_STATE_DIR` (and possibly `HOST_DUCKDB_DIR`) at an **empty, prod-owned** directory — never reuse the acceptance state files, otherwise the sync will try to update/delete UUIDs that do not exist in prod.
 
-Nach dem ersten Start: Sensoren (`email_on_run_failure`, `email_on_invalid_records`) und ggf. `full_sync_schedule` in der UI aktivieren. Für den ersten Prod-Lauf empfiehlt sich ein manueller Materialize des `*_published`-Assets statt direkt den Schedule scharf zu schalten.
+After the first start: enable the sensors (`email_on_run_failure`, `email_on_invalid_records`) and, if applicable, the `full_sync_schedule` in the UI. For the first prod run it is recommended to manually materialize the `*_published` asset rather than arming the schedule directly.
 
-#### Email-Alerts bei Run-Failures
+#### Email alerts on run failures
 
-Ein `run_failure_sensor` (`email_on_run_failure` in `dagster_defs/email_alerts.py`) verschickt bei jedem fehlgeschlagenen Dagster-Run eine Email an die in `EMAIL_TO` hinterlegten Empfänger. Der Body enthält Run-ID, Job-Name und Fehlertext; das vollständige Event-Log wird als `run_<id>.log` angehängt.
+A `run_failure_sensor` (`email_on_run_failure` in `dagster_defs/email_alerts.py`) sends an email to the recipients configured in `EMAIL_TO` on every failed Dagster run. The body contains the run ID, job name and error text; the full event log is attached as `run_<id>.log`.
 
-SMTP-Konfiguration via `.env` (siehe `.env.example`):
+SMTP configuration via `.env` (see `.env.example`):
 
 ```
 SMTP_HOST=smtp.example.ch
 SMTP_PORT=587
 SMTP_USER=alerts@example.ch
 SMTP_PASSWORD=...
-SMTP_USE_TLS=true
+SMTP_SECURITY=starttls  # starttls (port 587) | ssl (port 465)
 SMTP_FROM=alerts@example.ch
 EMAIL_TO=ops@example.ch,team@example.ch
 ```
 
-Fehlen `SMTP_HOST`, `SMTP_FROM` oder `EMAIL_TO`, wird der Sensor still übersprungen — der Sensor muss in der Dagster-UI unter *Sensors* aktiviert werden, damit er feuert.
+If `SMTP_HOST`, `SMTP_FROM` or `EMAIL_TO` are missing, the sensor is silently skipped — the sensor must be enabled in the Dagster UI under *Sensors* for it to fire.
 
 ### Purge
 
-Alle aktiven Records einer Source aus I14Y entfernen (Soft-Delete im State-File). Pro registrierter Source existiert ein Dagster-Job `<source>_purge` (z.B. `dataspot_purge`), der über die Dagster-UI unter *Jobs* gestartet wird. Default-Config ist Dry-Run; für eine echte Löschung im Launchpad:
+Remove all active records of a source from I14Y (soft-delete in the state file). For each registered source there is a Dagster job `<source>_purge` (e.g. `dataspot_purge`), started via the Dagster UI under *Jobs*. The default config is a dry run; for an actual deletion in the Launchpad:
 
 ```yaml
 ops:
@@ -172,19 +205,19 @@ ops:
       confirm: DELETE
 ```
 
-Ohne `confirm: DELETE` bei `dry_run: false` schlägt der Run absichtlich fehl. Resultate (`deleted`, `failed`, `per_resource`) erscheinen als Op-Metadata im Run-Log.
+Without `confirm: DELETE` when `dry_run: false`, the run fails intentionally. Results (`deleted`, `failed`, `per_resource`) appear as op metadata in the run log.
 
-### Ergebnisse
+### Results
 
-Die Ergebnisse liegen in `dataspot.duckdb`:
-- Dataset `<source>_raw` — Rohdaten aus der jeweiligen Quelle (eine Tabelle pro dlt-Resource)
-- Dataset `i14y_dcat` — Transformierte Daten im DCAT-Format (alle Quellen, eine Tabelle pro Resource)
+The results reside in the local DuckDB warehouse (default `data/metadata.duckdb`, configurable via `DUCKDB_PATH`):
+- Dataset `<source>_raw` — raw data from the respective source (one table per dlt resource)
+- Dataset `i14y_dcat` — transformed data in DCAT format (all sources, one table per resource)
 
-Remote-Zustand wird pro (Source, Resource) in `data/<source>_<resource>_ids.json` persistiert (Mapping Source-ID → I14Y-UUID inkl. `modified`-Timestamp und `transform_version`).
+Remote state is persisted per (source, resource) in `data/state/<source>_<resource>_ids.json` (mapping source ID → I14Y UUID, including `modified` timestamp and `transform_version`).
 
-## I14Y-Modelle regenerieren
+## Regenerating the I14Y models
 
-Die Pydantic-Modelle in `src/metadataswiss_connector/dcat/i14y_models.py` werden automatisch aus der I14Y OpenAPI-Spezifikation (`docs/i14y_rest_api.json`) generiert. Bei einer Aktualisierung der Spec:
+The Pydantic models in `src/metadataswiss_connector/dcat/i14y_models.py` are generated automatically from the I14Y OpenAPI specification (`docs/i14y_rest_api.json`). When updating the spec:
 
 ```bash
 uv run datamodel-codegen \
@@ -201,18 +234,18 @@ uv run datamodel-codegen \
   --allow-population-by-field-name
 ```
 
-Das File ist generiert — nicht von Hand bearbeiten. Kontrakt-Verstöße in `builders.py` oder `transform_to_dataset` werden nach der Regeneration vom Type-Checker bzw. zur Laufzeit von Pydantic gemeldet.
+The file is generated — do not edit it by hand. Contract violations in `builders.py` or `transform_to_dataset` are reported after regeneration by the type checker or at runtime by Pydantic.
 
 ## Tests
 
-Die Unit-Tests decken die reine Transformations-Schicht ab (Dataspot-Record → I14Y-Modell): `dcat/builders.py`, `sources/dataspot/mappings.py` und `sources/dataspot/transform.py`. Diese Funktionen sind ohne Netz/IO testbar, daher muss Dataspot **nicht gemockt** werden — die Eingaben stammen aus versionierten JSON-Fixtures unter `tests/fixtures/`.
+The unit tests cover the pure transformation layer (Dataspot record → I14Y model): `dcat/builders.py`, `sources/dataspot/mappings.py` and `sources/dataspot/transform.py`. These functions are testable without network/IO, so Dataspot does **not** need to be mocked — the inputs come from versioned JSON fixtures under `tests/fixtures/`.
 
 ```bash
 uv run pytest
 ```
 
-Die Extraktions-Schicht (`source.py`/`auth.py`, dlt-REST-API gegen Dataspot) ist bewusst nicht abgedeckt: Ein Mock der gesamten API testet eher dlt als unseren Code und ist wartungsintensiver. Neue Fachlogik in der Transformation sollte mit einem Fixture-basierten Testfall ergänzt werden.
+The extraction layer (`source.py`/`auth.py`, dlt REST API against Dataspot) is deliberately not covered: mocking the entire API tests dlt more than our code and is more maintenance-intensive. New domain logic in the transformation should be accompanied by a fixture-based test case.
 
-## Lizenz
+## License
 
-Siehe [LICENSE](LICENSE).
+See [LICENSE](LICENSE).

@@ -1,4 +1,4 @@
-"""Unit-Tests für die Dataspot→I14Y-Vokabular-Mappings (mappings.py)."""
+"""Unit tests for the Dataspot→I14Y vocabulary mappings (mappings.py)."""
 
 import pytest
 
@@ -22,12 +22,12 @@ class TestThemes:
         assert mappings.themes(["999"], "nope") is None
 
     def test_duplicates_collapsed_order_preserved(self):
-        # 010, 017 und 022 mappen alle auf 115 (Wirtschaft); 001 -> 117.
+        # 010, 017 and 022 all map to 115 (Wirtschaft); 001 -> 117.
         result = mappings.themes(["010", "001", "017", "022"], None)
         assert [c.code for c in result] == ["115", "117"]
 
     def test_topic_and_geo_combined_without_duplicate(self):
-        # topic 003 -> 122 und geoCategory boundaries -> 122 -> nur einmal.
+        # topic 003 -> 122 and geoCategory boundaries -> 122 -> only once.
         result = mappings.themes(["003"], "boundaries")
         assert [c.code for c in result] == ["122"]
 

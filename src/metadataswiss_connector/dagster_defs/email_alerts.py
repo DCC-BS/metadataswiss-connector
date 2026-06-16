@@ -227,8 +227,8 @@ def email_on_invalid_records(context: RunStatusSensorContext):
     html_body = render_html(groups, total_records)
     report = render_attachment(issues)
     subject = (
-        f"[metadataswiss-connector] {total_records} Datensätze mit "
-        f"Qualitätsproblemen ({run.job_name})"
+        f"[metadataswiss-connector] {total_records} records with "
+        f"quality issues ({run.job_name})"
     )
     attachment_name = f"invalid_records_{run.run_id}.txt"
 

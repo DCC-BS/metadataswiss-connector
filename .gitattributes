@@ -1,0 +1,35 @@
+# Normalize line endings: store everything as LF in the repository.
+# Git auto-detects text files and checks them out with native endings only
+# where overridden below.
+* text=auto eol=lf
+
+# Explicitly LF for source and config (consistent across Linux/Windows/CI)
+*.py    text eol=lf
+*.toml  text eol=lf
+*.cfg   text eol=lf
+*.ini   text eol=lf
+*.txt   text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.sh    text eol=lf
+*.env   text eol=lf
+Dockerfile      text eol=lf
+docker-compose* text eol=lf
+.env.example    text eol=lf
+
+# Windows-only scripts keep CRLF
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Binary files: never touch
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.xlsx  binary
+*.parquet binary
