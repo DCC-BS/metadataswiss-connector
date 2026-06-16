@@ -218,7 +218,11 @@ __marimo__/
 #custom
 debug.py
 .DS_Store
-data/
+.data/**
+!.data/.gitkeep
+!.data/state/
+!.data/state/.gitkeep
 
 # dagster
-.dagster_home/
+.dagster_home_dev/*
+!.dagster_home_dev/dagster.yaml

@@ -1,0 +1,10 @@
+concurrency:
+  pools:
+    default_limit: 1
+
+python_logs:
+  managed_python_loggers:
+    - metadataswiss_connector
+    - i14y_client
+    - dlt
+  python_log_level: INFO
