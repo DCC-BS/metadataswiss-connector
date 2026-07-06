@@ -1,0 +1,40 @@
+{
+  "record": {
+    "id": "ds-struct",
+    "label": "Strukturierter Datensatz",
+    "description": "Mit Strukturkomponenten."
+  },
+  "children": {},
+  "lookups": {
+    "dataset_structure_components": [
+      {
+        "dataset_id": "ds-struct",
+        "attribute_id": "attr-jahr",
+        "composition_id": "comp-1",
+        "composition_label": "Jahr",
+        "attribute_label": "year",
+        "attribute_description": "Erhebungsjahr",
+        "datatype_base_type": "INTEGER",
+        "attribute_required": "MANDATORY",
+        "attribute_cardinality": "ONE",
+        "order": 0
+      },
+      {
+        "dataset_id": "ds-struct",
+        "attribute_id": "attr-geschlecht",
+        "composition_id": "comp-2",
+        "composition_label": "Geschlecht",
+        "datatype_kind": "ReferenceObject",
+        "datatype_id": "concept-001",
+        "datatype_base_type": "STRING",
+        "order": 1
+      },
+      {
+        "dataset_id": "ds-other",
+        "attribute_id": "attr-fremd",
+        "composition_id": "comp-x",
+        "order": 0
+      }
+    ]
+  }
+}

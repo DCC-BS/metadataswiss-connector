@@ -1,0 +1,61 @@
+site_name: metadataswiss-connector
+site_description: >-
+  Connector that extracts catalog metadata, transforms it into DCAT-AP-CH and
+  publishes it to the federal I14Y interoperability platform.
+repo_url: https://github.com/DCC-BS/metadataswiss-connector
+repo_name: DCC-BS/metadataswiss-connector
+edit_uri: ""
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - content.code.copy
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+nav:
+  - Home: index.md
+  - Mappings: mappings.md
+  - API reference:
+      - Core: reference/index.md
+      - Dataspot source: reference/dataspot.md
+      - DCAT layer: reference/dcat.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_root_heading: true
+            show_root_full_path: false
+            show_source: true
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+            signature_crossrefs: false
+            filters: ["!^_"]
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences

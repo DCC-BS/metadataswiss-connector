@@ -1,0 +1,40 @@
+{
+  "record": {
+    "id": "concept-001",
+    "label": "Geschlecht",
+    "description": "<p>Codeliste der Geschlechter.</p>",
+    "date_created": 1690000000000
+  },
+  "children": {
+    "code_list_entries": [
+      {
+        "id": "e1",
+        "code": "1",
+        "long_text": "männlich",
+        "short_text": "m",
+        "description": "<p>männliches Geschlecht</p>",
+        "valid_from": 1577836800000,
+        "valid_to": 32503593600000
+      },
+      {
+        "id": "e2",
+        "code": "2",
+        "long_text": "weiblich",
+        "short_text": "w",
+        "valid_from": -2208988800000,
+        "valid_to": 32503593600000
+      },
+      {
+        "id": "e3",
+        "code": "2.1",
+        "short_text": "Untergruppe",
+        "parent_id": "e2"
+      },
+      {
+        "id": "e4",
+        "code": null,
+        "short_text": "ohne Code"
+      }
+    ]
+  }
+}

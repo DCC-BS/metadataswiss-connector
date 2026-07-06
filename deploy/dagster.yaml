@@ -1,0 +1,44 @@
+# Production Dagster instance config (used inside the Docker image at
+# $DAGSTER_HOME). Unlike the local `.dagster_home/dagster.yaml`, this uses
+# Postgres so the webserver, daemon and code server — three separate
+# containers — share run/event/schedule storage reliably (SQLite over a
+# shared volume is not safe for multi-process access).
+
+storage:
+  postgres:
+    postgres_db:
+      username:
+        env: DAGSTER_PG_USERNAME
+      password:
+        env: DAGSTER_PG_PASSWORD
+      hostname:
+        env: DAGSTER_PG_HOST
+      db_name:
+        env: DAGSTER_PG_DB
+      port: 5432
+
+# Queue runs through the daemon so global/pool concurrency limits apply
+# across containers.
+run_coordinator:
+  module: dagster.core.run_coordinator
+  class: QueuedRunCoordinator
+
+# Default launcher executes each run as a subprocess of the code gRPC
+# server — i.e. inside the single `connector_code` container, which is the
+# only place the DuckDB volume is mounted. That keeps DuckDB to one writer.
+run_launcher:
+  module: dagster
+  class: DefaultRunLauncher
+
+# DuckDB allows a single writing process per file; the writer assets share
+# this pool (limit 1) so two runs never hold the write lock at once.
+concurrency:
+  pools:
+    default_limit: 1
+
+python_logs:
+  managed_python_loggers:
+    - metadataswiss_connector
+    - i14y_client
+    - dlt
+  python_log_level: INFO
