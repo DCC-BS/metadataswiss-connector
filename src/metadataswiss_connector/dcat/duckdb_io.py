@@ -51,7 +51,27 @@ def read_transformed(
         sql = f'SELECT * FROM i14y_dcat."{table_name}"'
         if limit:
             sql += f" LIMIT {limit}"
-        rows = con.execute(sql).fetchall()
+        try:
+            rows = con.execute(sql).fetchall()
+        except duckdb.CatalogException:
+            # dlt's write_disposition="replace" infers the table schema from
+            # the rows it receives, so when every source record of a resource
+            # is dropped at validation (e.g. a mandatory field like
+            # ``description`` is missing on the Dataspot record) the
+            # i14y_dcat table is never created. Surface that here as a clear,
+            # actionable message instead of letting the raw "table does not
+            # exist" error mask the cause. The specific record id and field
+            # are logged by the transform step (see transforms.py) and
+            # surfaced as the transformed asset's invalid_records metadata.
+            logger.warning(
+                "No transformed table i14y_dcat.%s — the transform produced "
+                "zero valid records. Every source record was dropped at "
+                "validation, typically because a mandatory field is missing; "
+                "see the transform step's invalid-records log for the "
+                "offending id(s) and field(s). Nothing to publish.",
+                table_name,
+            )
+            return []
         columns = [col[0] for col in con.description]
 
         # Load child tables (one-to-many fields like keywords, identifiers)
