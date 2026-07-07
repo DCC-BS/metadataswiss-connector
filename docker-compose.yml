@@ -18,6 +18,17 @@ x-pg-env: &pg-env
   DAGSTER_PG_DB: ${DAGSTER_PG_DB:-dagster}
   DAGSTER_HOME: /opt/dagster/dagster_home
 
+# Exclude in-cluster gRPC/HTTP traffic from any corporate proxy. On hosts with
+# HTTP_PROXY/HTTPS_PROXY set (often auto-injected into every container by the
+# Docker daemon proxy config), gRPC would otherwise route localhost:4000 and
+# connector_code:4000 through the proxy and fail with "Connection reset by peer".
+# gRPC reads `no_grpc_proxy` specifically (not standard no_proxy); NO_PROXY
+# covers any plain-HTTP calls between the services.
+x-no-proxy: &no-proxy
+  no_grpc_proxy: localhost,127.0.0.1,postgres,connector_code,webserver,daemon
+  NO_PROXY: localhost,127.0.0.1,postgres,connector_code,webserver,daemon
+  no_proxy: localhost,127.0.0.1,postgres,connector_code,webserver,daemon
+
 services:
   postgres:
     image: postgres:16
@@ -39,7 +50,7 @@ services:
     # Inherits the image CMD (dagster api grpc … on :4000).
     env_file: .env
     environment:
-      <<: *pg-env
+      <<: [*pg-env, *no-proxy]
       # Runtime-writable paths INSIDE the container. They live on bind-mounted
       # host directories (see volumes below), so a local Docker run reads and
       # writes the SAME state files + DuckDB as a bare `dagster dev`.
@@ -66,7 +77,7 @@ services:
       ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000",
        "-w", "/opt/dagster/workspace.yaml"]
     environment:
-      <<: *pg-env
+      <<: [*pg-env, *no-proxy]
     ports:
       - "3000:3000"
     depends_on:
@@ -81,7 +92,7 @@ services:
     command:
       ["dagster-daemon", "run", "-w", "/opt/dagster/workspace.yaml"]
     environment:
-      <<: *pg-env
+      <<: [*pg-env, *no-proxy]
     depends_on:
       postgres:
         condition: service_healthy
