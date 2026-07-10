@@ -171,7 +171,12 @@ def load_scalar_children(
 
 
 def load_sibling_children(
-    client, dataset_name: str, parent_table: str, *, parent_key: str
+    client,
+    dataset_name: str,
+    parent_table: str,
+    *,
+    parent_key: str,
+    ref_parent: str | None = None,
 ) -> tuple[dict[str, dict[str, list[dict]]], dict[str, list[dict]]]:
     """Load top-level sibling tables alongside the parent.
 
@@ -185,11 +190,18 @@ def load_sibling_children(
       loaded in full and keyed by table name. Used by transforms for
       cross-reference data (e.g. attribution → role/post/person).
 
+    dlt derives the ref column from the *extract* resource the children
+    resolve from (``_<resource>_<key>``). ``ref_parent`` names that
+    resource when it differs from ``parent_table`` — e.g. when the
+    transform reads a filtered transformer table (``data_products``) but
+    its children were extracted against the broad upstream resource
+    (``data_products_all``).
+
     Sibling rows stay dlt-flattened (``custom_properties__x`` columns):
     transforms address raw records by their flat keys.
     """
     query = sql_client_query(client)
-    ref_col = f"_{parent_table}_{parent_key}"
+    ref_col = f"_{ref_parent or parent_table}_{parent_key}"
 
     result: dict[str, dict[str, list[dict]]] = {}
     lookups: dict[str, list[dict]] = {}

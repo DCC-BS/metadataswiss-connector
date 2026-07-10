@@ -17,7 +17,7 @@ from metadataswiss_connector.dcat.transforms import run_transform
 
 
 # Which I14Y entity a transformed record targets. Drives sync routing
-# (datasets endpoint vs concepts endpoint, identifier shape, state file).
+# (datasets endpoint vs concepts endpoint, state file).
 ResourceKind = Literal["dataset", "concept", "dataservice"]
 
 
@@ -66,11 +66,21 @@ class ResourceSpec:
                 upstream deps on the transformed asset; runtime behaviour
                 is unaffected (lookups are still discovered dynamically
                 by ``load_sibling_children``).
+        sibling_parent: Name of the *extract* dlt resource that this
+                resource's sibling child tables resolve from. dlt names
+                their parent-ref column ``_<extract resource>_id``, so
+                this must be set whenever the transform reads a filtered
+                transformer table whose children were extracted against
+                a differently-named upstream resource (e.g.
+                ``data_products`` reading ``distributions`` extracted
+                via ``data_products_all``). ``None`` means the children
+                reference this resource's own name.
     """
 
     transform: TransformFn
     kind: ResourceKind = "dataset"
     lookups: tuple[str, ...] = ()
+    sibling_parent: str | None = None
 
 
 @dataclass(frozen=True)

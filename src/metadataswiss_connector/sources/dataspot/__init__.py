@@ -17,6 +17,10 @@ dataspot_catalog_source = CatalogSource(
         "data_products": ResourceSpec(
             transform_to_dataset,
             kind="dataset",
+            # ``distributions`` resolves from the broad ``data_products_all``
+            # extract resource, so its parent-ref column is
+            # ``_data_products_all_id`` — not ``_data_products_id``.
+            sibling_parent="data_products_all",
             lookups=(
                 "distributions",
                 "dataset_structure_components",

@@ -128,6 +128,7 @@ def run_transform_resource(
         _read_and_transform(
             pipeline_raw, resource_name, spec.transform,
             publisher=publisher, stats=stats, extra_lookups=extra_lookups,
+            sibling_parent=spec.sibling_parent,
         ),
         table_name=resource_name,
         write_disposition="replace",
@@ -154,6 +155,7 @@ def _read_and_transform(
     publisher: str,
     stats: dict | None = None,
     extra_lookups: dict[str, list[dict]] | None = None,
+    sibling_parent: str | None = None,
 ) -> Generator[dict, None, None]:
     """Read a raw resource table from DuckDB and yield transformed records.
 
@@ -166,7 +168,8 @@ def _read_and_transform(
             client, pipeline.dataset_name, table_name
         )
         siblings_by_parent, raw_lookups = load_sibling_children(
-            client, pipeline.dataset_name, table_name, parent_key="id"
+            client, pipeline.dataset_name, table_name, parent_key="id",
+            ref_parent=sibling_parent,
         )
         # One Lookups view per run: its memoized indexes are shared by
         # every per-record transform call below.

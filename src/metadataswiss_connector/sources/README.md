@@ -19,19 +19,27 @@ A new source `sources/<name>/` is expected to expose a single
 | `resources`            | `dict[str, ResourceSpec]` — one entry per raw dlt resource you want to publish to I14Y.                            |
 | `publisher` (optional) | Per-source publisher override; falls back to the global `I14Y_PUBLISHER_IDENTIFIER`.                               |
 
-`ResourceSpec(transform, kind, lookups)`:
+`ResourceSpec(transform, kind, lookups, sibling_parent)`:
 
 - **`transform`** — function with signature
   `(record, children, *, lookups, publisher) -> BaseModel | (BaseModel, extras)`.
   Maps one raw row to an I14Y input model (see `dcat/i14y_models.py`).
   Validation errors are caught and logged by `dcat/transforms.py`; you don't need to.
 - **`kind`** — `"dataset"` or `"concept"`. Drives sync routing
-  (datasets endpoint vs. concepts endpoint, identifier shape, state file).
+  (datasets endpoint vs. concepts endpoint, state file).
 - **`lookups`** — names of *other* raw dlt resources in the same source
   whose rows your transform reads via the `children` / `lookups`
   arguments. Declared explicitly so Dagster lineage shows the cross-table
   reads as upstream deps; runtime behaviour is unaffected (lookups are
   still discovered dynamically).
+- **`sibling_parent`** — name of the *extract* dlt resource that this
+  resource's sibling child tables resolve from. dlt names their
+  parent-ref column `_<extract resource>_id`, so this must be set when
+  the transform reads a filtered transformer table whose children were
+  extracted against a differently-named upstream resource (dataspot:
+  `data_products` reads `distributions`, which resolve from
+  `data_products_all`). Omit it when the children reference this
+  resource's own name (dataspot: `code_lists` / `code_list_entries`).
 
 ## The transform contract
 
