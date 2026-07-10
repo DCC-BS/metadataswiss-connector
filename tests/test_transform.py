@@ -211,7 +211,7 @@ class TestTransformToConcept:
 
     def test_concept_core_fields(self, load_fixture):
         model, _ = self._build(load_fixture)
-        assert model.identifier == "concept-001"
+        assert model.identifiers == ["concept-001"]
         assert model.name.de == "Geschlecht"
         assert model.description.de == "Codeliste der Geschlechter."
         assert model.version == constants.CONCEPT_VERSION

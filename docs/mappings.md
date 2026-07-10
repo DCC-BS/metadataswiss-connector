@@ -82,7 +82,7 @@ _Built by `transform_to_concept()` -> `CodeListConceptInput`._
 
 | I14Y field | Dataspot source | Transform |
 | --- | --- | --- |
-| `identifier` | `id` | - |
+| `identifiers` | `id` | - |
 | `name` | `label` | multi_language |
 | `description` | `label`, `description` | multi_language, html_to_plain_text |
 | `publisher` | `publisher` (param) | - |

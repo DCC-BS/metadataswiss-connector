@@ -94,7 +94,7 @@ def read_transformed(
                 except (ValueError, TypeError):
                     logger.warning(
                         "Failed to decode extras column on %s id=%r",
-                        table_name, record.get("identifier") or record.get("id"),
+                        table_name, record.get("identifiers") or record.get("id"),
                     )
             results.append(record)
         return results

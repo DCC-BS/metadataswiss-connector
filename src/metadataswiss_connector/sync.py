@@ -50,14 +50,9 @@ class ResourceClient(Protocol):
 SourceIdFn = Callable[[dict], str]
 
 
-def _dataset_source_id(record: dict) -> str:
+def _source_id(record: dict) -> str:
     """First entry of ``identifiers`` is the stable cross-system key."""
     return str(record["identifiers"][0])
-
-
-def _concept_source_id(record: dict) -> str:
-    """``identifier`` (singular) is the stable cross-system key on concepts."""
-    return str(record["identifier"])
 
 
 def payload_hash(record: dict) -> str:
@@ -244,8 +239,7 @@ def sync_records(
                        validating as ``model_class``.
         model_class: Pydantic input model class for the resource.
         source_id_for: Pull the stable source identifier out of a record.
-                       Datasets use ``identifiers[0]``, concepts use
-                       ``identifier``.
+                       All current kinds use ``identifiers[0]``.
         state_path: Per-resource state file (one file per source+resource).
         dry_run: Compute the diff without calling the API.
         force: Re-publish existing records regardless of payload hash.
@@ -480,11 +474,9 @@ class _KindSpec:
 
 
 _KINDS: dict[str, _KindSpec] = {
-    "dataset": _KindSpec("datasets", DcatDatasetInputModel, _dataset_source_id),
-    "concept": _KindSpec("concepts", CodeListConceptInput, _concept_source_id),
-    "dataservice": _KindSpec(
-        "dataservices", DataServiceInputModel, _dataset_source_id
-    ),
+    "dataset": _KindSpec("datasets", DcatDatasetInputModel, _source_id),
+    "concept": _KindSpec("concepts", CodeListConceptInput, _source_id),
+    "dataservice": _KindSpec("dataservices", DataServiceInputModel, _source_id),
 }
 
 

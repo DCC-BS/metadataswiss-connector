@@ -23,7 +23,7 @@ from typing import TypedDict
 
 
 # I14Y concept IRI base used for ``dcterms:conformsTo`` on code-list-typed
-# attributes. The source's enumeration UUID is published as ``identifier``
+# attributes. The source's enumeration UUID is published in ``identifiers``
 # on the corresponding I14Y concept, so ``<base>/<id>`` resolves to the
 # concept page. Env-configurable because abnahme and prod live on
 # different hosts; default targets abnahme.

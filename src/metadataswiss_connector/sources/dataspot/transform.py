@@ -321,7 +321,7 @@ def transform_to_concept(
         key=lambda e: (str(e.get("code") or ""), str(e.get("id") or "")),
     )
     model = CodeListConceptInput(
-        identifier=record["id"],
+        identifiers=[record["id"]],
         name=dcat.multi_language(record.get("label")),
         description=(
             dcat.multi_language(dcat.html_to_plain_text(record.get("description")))

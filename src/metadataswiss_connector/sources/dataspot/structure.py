@@ -56,8 +56,8 @@ def _to_structure_component(row: dict) -> StructureComponent:
     }
 
     # Code-list-typed attributes carry a conformsTo pointing at the I14Y
-    # concept IRI. The Dataspot enumeration UUID is published as
-    # ``identifier`` on the corresponding I14Y concept, so the same id
+    # concept IRI. The Dataspot enumeration UUID is published in
+    # ``identifiers`` on the corresponding I14Y concept, so the same id
     # appended to the I14Y concept IRI base resolves directly to the
     # concept page (no extra lookup needed).
     if row.get("datatype_kind") == DATATYPE_KIND_ENUMERATION and row.get("datatype_id"):
