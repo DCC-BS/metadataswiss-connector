@@ -82,7 +82,7 @@ When the transform logic of an existing source changes, `transform_version` shou
 
 ## Requirements
 
-- Python >= 3.14
+- Python >=3.13 <3.14
 - [uv](https://docs.astral.sh/uv/)
 
 ## Setup
@@ -228,7 +228,7 @@ uv run datamodel-codegen \
   --snake-case-field \
   --use-field-description \
   --field-constraints \
-  --target-python-version 3.14 \
+  --target-python-version 3.13 \
   --use-standard-collections \
   --use-union-operator \
   --allow-population-by-field-name

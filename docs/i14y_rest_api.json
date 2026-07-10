@@ -1,8 +1,8 @@
 {
-  "openapi": "3.0.1",
+  "openapi": "3.0.4",
   "info": {
     "title": "I14Y Partner API",
-    "description": "Deployment info: 1.13.16-build.37, Assembly: 1.13.16.0",
+    "description": "Deployment info: 1.15.4-build.45, Assembly: 1.15.4.0",
     "version": "v1"
   },
   "servers": [
@@ -18,6 +18,321 @@
     }
   ],
   "paths": {
+    "/agents": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Gets the agents matching the given filters.",
+        "parameters": [
+          {
+            "name": "identifier",
+            "in": "query",
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "uid",
+            "in": "query",
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 1
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "description": "",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "example": 25
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                    }
+                  ]
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                    }
+                  ]
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentModelCollectionDataWrapper"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentModelCollectionDataWrapper"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentModelCollectionDataWrapper"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/agents/{agentId}": {
+      "get": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Gets the agent with the given id.",
+        "parameters": [
+          {
+            "name": "agentId",
+            "in": "path",
+            "description": "",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                    }
+                  ]
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                    }
+                  ]
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                    }
+                  ]
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                    }
+                  ]
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                    }
+                  ]
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                    }
+                  ]
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                    }
+                  ]
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                    }
+                  ]
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ProblemDetails"
+                    },
+                    {
+                      "$ref": "#/components/schemas/HttpValidationProblemDetails"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentModelDataWrapper"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentModelDataWrapper"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentModelDataWrapper"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/catalogs/{catalogId}/dcat/exports/{dataFormat}": {
       "get": {
         "tags": [
@@ -4345,7 +4660,6 @@
           }
         ],
         "requestBody": {
-          "description": "The import file.",
           "content": {
             "multipart/form-data": {
               "schema": {
@@ -4353,6 +4667,7 @@
                 "properties": {
                   "file": {
                     "type": "string",
+                    "description": "The import file.",
                     "format": "binary"
                   }
                 }
@@ -4527,7 +4842,7 @@
           {
             "name": "query",
             "in": "query",
-            "description": "The search query. The search is performed in the selected language only. \r\n\r\nYou can use * to represent any number of characters and ? to represent a single character.\r\nExamples:\r\n- Agricultur*\r\n- Agricultur?",
+            "description": "The search query. The search is performed in the selected language only. \n\nYou can use * to represent any number of characters and ? to represent a single character.\nExamples:\n- Agricultur*\n- Agricultur?",
             "schema": {
               "type": "string"
             }
@@ -4743,7 +5058,7 @@
           {
             "name": "query",
             "in": "query",
-            "description": "The search query. The search is performed in the selected language only. \r\n\r\nYou can use * to represent any number of characters and ? to represent a single character.\r\nExamples:\r\n- Agricultur*\r\n- Agricultur?",
+            "description": "The search query. The search is performed in the selected language only. \n\nYou can use * to represent any number of characters and ? to represent a single character.\nExamples:\n- Agricultur*\n- Agricultur?",
             "schema": {
               "type": "string"
             }
@@ -11059,7 +11374,6 @@
           }
         ],
         "requestBody": {
-          "description": "The import file.",
           "content": {
             "multipart/form-data": {
               "schema": {
@@ -11067,6 +11381,7 @@
                 "properties": {
                   "file": {
                     "type": "string",
+                    "description": "The import file.",
                     "format": "binary"
                   }
                 }
@@ -13189,6 +13504,13 @@
             "type": "string",
             "nullable": true
           },
+          "images": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResourceModel"
+            },
+            "nullable": true
+          },
           "name": {
             "$ref": "#/components/schemas/MultiLanguageModel"
           },
@@ -13267,16 +13589,6 @@
         "enum": [
           "RDF",
           "TTL"
-        ],
-        "type": "string"
-      },
-      "SearchResourceType": {
-        "enum": [
-          "Dataset",
-          "DataService",
-          "PublicService",
-          "Concept",
-          "MappingTable"
         ],
         "type": "string"
       },
@@ -14747,9 +15059,7 @@
           "description",
           "name",
           "publisher",
-          "responsibleDeputy",
           "responsiblePerson",
-          "validFrom",
           "version"
         ],
         "type": "object",
@@ -14851,7 +15161,8 @@
           },
           "validFrom": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "nullable": true
           },
           "validTo": {
             "type": "string",
@@ -14870,7 +15181,6 @@
           "description",
           "name",
           "publisher",
-          "responsibleDeputy",
           "responsiblePerson",
           "system",
           "version"
@@ -15003,7 +15313,8 @@
           },
           "validFrom": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "nullable": true
           },
           "validTo": {
             "type": "string",
@@ -15083,7 +15394,6 @@
           "description",
           "name",
           "publisher",
-          "responsibleDeputy",
           "responsiblePerson",
           "source",
           "target",
@@ -15162,7 +15472,6 @@
           "description",
           "name",
           "publisher",
-          "responsibleDeputy",
           "responsiblePerson",
           "source",
           "system",
@@ -15656,10 +15965,13 @@
         },
         "additionalProperties": false
       },
-      "SearchStructureOption": {
+      "SearchResourceType": {
         "enum": [
-          "WithStructure",
-          "WithoutStructure"
+          "Dataset",
+          "DataService",
+          "PublicService",
+          "Concept",
+          "MappingTable"
         ],
         "type": "string"
       },
@@ -15729,6 +16041,9 @@
           "structure": {
             "$ref": "#/components/schemas/SearchStructureOption"
           },
+          "system": {
+            "$ref": "#/components/schemas/SystemInfoModel"
+          },
           "themes": {
             "type": "array",
             "items": {
@@ -15758,6 +16073,13 @@
           }
         },
         "additionalProperties": false
+      },
+      "SearchStructureOption": {
+        "enum": [
+          "WithStructure",
+          "WithoutStructure"
+        ],
+        "type": "string"
       },
       "SystemInfoModel": {
         "type": "object",
@@ -15841,6 +16163,15 @@
           "uri": {
             "type": "string",
             "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentModelDataWrapper": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AgentModel"
           }
         },
         "additionalProperties": false
@@ -15985,6 +16316,19 @@
         },
         "additionalProperties": false
       },
+      "AgentModelCollectionDataWrapper": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentModel"
+            },
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
       "DcatCatalogModelCollectionDataWrapper": {
         "type": "object",
         "properties": {
@@ -16121,9 +16465,7 @@
           "description",
           "name",
           "publisher",
-          "responsibleDeputy",
           "responsiblePerson",
-          "validFrom",
           "version"
         ],
         "type": "object",
@@ -16178,7 +16520,8 @@
           },
           "validFrom": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "nullable": true
           },
           "validTo": {
             "type": "string",
