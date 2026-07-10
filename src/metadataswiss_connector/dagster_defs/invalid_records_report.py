@@ -14,11 +14,17 @@ import html
 
 from metadataswiss_connector.config import dataspot_web_base
 
-# Human labels for the pipeline stage an issue surfaced at. ``transform``
-# = the record failed local validation against the I14Y contract;
-# ``publish`` = I14Y's API rejected the request. Both are fixed in
-# dataspot, but the distinction tells maintainers where to look.
-_STAGE_LABELS = {"transform": "Validation", "publish": "I14Y publish"}
+# Human labels for the pipeline stage an issue surfaced at. ``extract``
+# = the source API refused to deliver part of a record (it is published
+# incomplete); ``transform`` = the record failed local validation against
+# the I14Y contract; ``publish`` = I14Y's API rejected the request. All
+# are fixed in dataspot, but the distinction tells maintainers where to
+# look.
+_STAGE_LABELS = {
+    "extract": "Extraction",
+    "transform": "Validation",
+    "publish": "I14Y publish",
+}
 
 # dataspot UI path segment per resource kind. Data products (datasets and
 # APIs/dataservices) live under ``datasets``; code-list concepts under
@@ -112,12 +118,14 @@ def _records(n: int) -> str:
 def _intro(total_records: int) -> str:
     if total_records == 1:
         return (
-            "1 record was skipped during the sync to I14Y. Please correct it "
-            "in dataspot so that it is published on the next run."
+            "1 record could not be synced (or only partially synced) to I14Y. "
+            "Please correct it in dataspot so that it is published completely "
+            "on the next run."
         )
     return (
-        f"{total_records} records were skipped during the sync to I14Y. "
-        "Please correct them in dataspot so that they are published on the next run."
+        f"{total_records} records could not be synced (or only partially "
+        "synced) to I14Y. Please correct them in dataspot so that they are "
+        "published completely on the next run."
     )
 
 

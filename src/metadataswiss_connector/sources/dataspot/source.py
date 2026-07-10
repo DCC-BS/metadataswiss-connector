@@ -1,6 +1,8 @@
 import logging
+from urllib.parse import urlparse
 
 import dlt
+from dlt.sources.helpers.rest_client.exceptions import IgnoreResponseException
 from dlt.sources.rest_api import rest_api_resources
 
 logger = logging.getLogger(__name__)
@@ -19,35 +21,102 @@ def _is_public(item: dict) -> bool:
     return item.get("publicState") == PUBLIC_STATE
 
 
+# Skips recorded by ``_skip_responses`` during the current extract. Drained
+# (and thereby cleared) by the Dagster extract asset via
+# ``drain_extract_skips`` after ``pipeline.run`` — from there they flow into
+# the quality-issues alert email. Plain module state is safe here: Dagster
+# runs each extract asset in its own subprocess, and list.append is atomic.
+_extract_skips: list[dict] = []
+
+# id → label of every data product that streamed through the current
+# extract. The skip hook only sees the failing HTTP response (child URL),
+# so this is how a skip gets a human-readable title into the alert email.
+_parent_labels: dict[str, str | None] = {}
+
+
+def _remember_label(item: dict) -> dict:
+    if item.get("id"):
+        _parent_labels[item["id"]] = item.get("label") or item.get("title")
+    return item
+
+
+def drain_extract_skips() -> list[dict]:
+    """Return and clear the skips recorded by the last extract.
+
+    Each dict matches the ``invalid_details`` shape the alert email
+    consumes (``id``/``title``/``stage``/``kind``/``field_errors``) plus
+    ``resource`` so the caller can attach it to the right raw asset.
+    """
+    skips = list(_extract_skips)
+    _extract_skips.clear()
+    return skips
+
+
+def _skip_responses(name: str, statuses: tuple[int, ...]):
+    """Response hook that skips (instead of fails on) the given statuses.
+
+    Equivalent to dlt's built-in ``{"action": "ignore"}`` response action,
+    except that dlt only logs the skip at INFO on its own logger (silent at
+    the default WARNING level) — here it surfaces as a WARNING in the run
+    logs and is recorded for the quality-issues email. 404 stays quiet: it
+    just means the item has no children, which is routine. Statuses not
+    listed fall through to dlt's raise_for_status.
+    """
+
+    def _hook(response, *args, **kwargs):
+        if response.status_code not in statuses:
+            return
+        if response.status_code != 404:
+            detail = response.text[:200]
+            logger.warning(
+                "Skipping %s (HTTP %s): %s", response.url, response.status_code, detail
+            )
+            # Child paths end in .../{parent_id}/{name}, so the owning
+            # dataset is the second-to-last path segment.
+            parent_id = urlparse(response.url).path.rstrip("/").split("/")[-2]
+            _extract_skips.append({
+                "resource": name,
+                "id": parent_id,
+                "title": _parent_labels.get(parent_id),
+                "stage": "extract",
+                "kind": "dataset",
+                "field_errors": [{
+                    "field": name,
+                    "message": (
+                        f"{name} could not be extracted (HTTP"
+                        f" {response.status_code}): {detail}"
+                    ),
+                }],
+            })
+        raise IgnoreResponseException
+
+    return _hook
+
+
 def _public_resource(
     name: str,
     path: str,
     data_selector: str,
     *,
     parent: bool = False,
-    ignore_404: bool = False,
-    ignore_500: bool = False,
+    ignore_statuses: tuple[int, ...] = (),
 ) -> dict:
     """Build a dlt rest_api resource spec for a public Dataspot endpoint.
 
     All Dataspot endpoints we consume share the same shape: a single page
     of HAL-style ``_embedded`` entries that we filter to ``publicState ==
     PUBLIC``. ``parent=True`` marks the spec as a child resource so dlt's
-    rest_api transformer wires up ``include_from_parent``; ``ignore_404``
-    silences missing children (collections without distributions etc.).
+    rest_api transformer wires up ``include_from_parent``;
+    ``ignore_statuses`` skips per-item error responses (missing children,
+    Dataspot server-side bugs) instead of failing the run.
     """
     endpoint: dict = {
         "path": path,
         "paginator": "single_page",
         "data_selector": data_selector,
     }
-    response_actions: list[dict] = []
-    if ignore_404:
-        response_actions.append({"status_code": 404, "action": "ignore"})
-    if ignore_500:
-        response_actions.append({"status_code": 500, "action": "ignore"})
-    if response_actions:
-        endpoint["response_actions"] = response_actions
+    if ignore_statuses:
+        endpoint["response_actions"] = [_skip_responses(name, ignore_statuses)]
     spec: dict = {
         "name": name,
         "endpoint": endpoint,
@@ -92,21 +161,26 @@ def dataspot_source(
 
     api_base_url = f"{base_url}/rest/{database_name}"
 
+    # Broad fetch over every public data product regardless of
+    # stereotype. Downstream filter transformers split this into
+    # ``data_products`` (OGD/GEO → I14Y Dataset) and
+    # ``data_services`` (API → I14Y DataService). Ancestry walks
+    # also consume this broad stream so contact points / data
+    # owners get resolved for API records too.
+    products_spec = _public_resource(
+        "data_products_all",
+        "schemes/Datenprodukte/datasets",
+        "_embedded.datasets",
+    )
+    # Record id → label so skip entries (see _skip_responses) can carry a
+    # human-readable title into the alert email.
+    products_spec["processing_steps"].append({"map": _remember_label})
+
     config = {
         "client": {"base_url": api_base_url, "auth": auth},
         "resource_defaults": {"primary_key": "id", "write_disposition": "merge"},
         "resources": [
-            # Broad fetch over every public data product regardless of
-            # stereotype. Downstream filter transformers split this into
-            # ``data_products`` (OGD/GEO → I14Y Dataset) and
-            # ``data_services`` (API → I14Y DataService). Ancestry walks
-            # also consume this broad stream so contact points / data
-            # owners get resolved for API records too.
-            _public_resource(
-                "data_products_all",
-                "schemes/Datenprodukte/datasets",
-                "_embedded.datasets",
-            ),
+            products_spec,
             _public_resource(
                 "code_lists",
                 "schemes/Referenzdaten/enumerations",
@@ -117,24 +191,26 @@ def dataspot_source(
                 "schemes/Referenzdaten/enumerations/{resources.code_lists.id}/literals",
                 "_embedded.literals",
                 parent=True,
-                ignore_404=True,
+                ignore_statuses=(404,),
             ),
             _public_resource(
                 "distributions",
                 "datasets/{resources.data_products_all.id}/distributions",
                 "_embedded.distributions",
                 parent=True,
-                ignore_404=True,
+                ignore_statuses=(404,),
             ),
             _public_resource(
                 "compositions",
                 "datasets/{resources.data_products_all.id}/compositions",
                 "_embedded.compositions",
                 parent=True,
-                ignore_404=True,
-                # Dataspot returns 500 on compositions for some datasets
-                # (server-side bug). Skip rather than fail the whole run.
-                ignore_500=True,
+                # Dataspot server-side bugs on compositions for some
+                # datasets: 500 for some, 400 ("BusinessAttribute ...
+                # forbidden") when a composition links an attribute the
+                # API user may not see. Skip the dataset's structure
+                # rather than fail the whole run.
+                ignore_statuses=(400, 404, 500),
             ),
         ],
     }

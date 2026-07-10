@@ -1,5 +1,8 @@
 from metadataswiss_connector.registry import CatalogSource, ResourceSpec
-from metadataswiss_connector.sources.dataspot.source import dataspot_source
+from metadataswiss_connector.sources.dataspot.source import (
+    dataspot_source,
+    drain_extract_skips,
+)
 from metadataswiss_connector.sources.dataspot.transform import (
     transform_to_concept,
     transform_to_dataservice,
@@ -9,6 +12,7 @@ from metadataswiss_connector.sources.dataspot.transform import (
 dataspot_catalog_source = CatalogSource(
     name="dataspot",
     dlt_source_factory=dataspot_source,
+    drain_extract_skips=drain_extract_skips,
     resources={
         "data_products": ResourceSpec(
             transform_to_dataset,

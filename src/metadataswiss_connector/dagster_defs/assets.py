@@ -109,14 +109,23 @@ def _build_raw_group(
         # a parent only to feed its children without persisting it).
         dlt_source = source.dlt_source_factory().with_resources(*resource_names)
         pipeline = raw_pipeline_for(source)
+        if source.drain_extract_skips:
+            source.drain_extract_skips()  # discard residue from prior runs
         load_info = pipeline.run(dlt_source)
+        skips = source.drain_extract_skips() if source.drain_extract_skips else []
         for name in resource_names:
             resource = dlt_source.resources[name]
+            metadata = dlt.extract_resource_metadata(
+                context, resource, load_info, pipeline
+            )
+            resource_skips = [s for s in skips if s.get("resource") == name]
+            if resource_skips:
+                # Same key/shape as the transformed/published assets, so the
+                # email_on_invalid_records sensor picks these up unchanged.
+                metadata["invalid_details_json"] = MetadataValue.json(resource_skips)
             yield MaterializeResult(
                 asset_key=AssetKey(f"{source.name}_{name}_raw"),
-                metadata=dlt.extract_resource_metadata(
-                    context, resource, load_info, pipeline
-                ),
+                metadata=metadata,
             )
 
     return _extract

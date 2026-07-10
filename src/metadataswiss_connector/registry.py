@@ -85,12 +85,19 @@ class CatalogSource:
         resources: Maps dlt resource name → ResourceSpec (transform + kind).
         publisher: Optional publisher override. If ``None``, the caller's
               global publisher (e.g. from ``I14YConfig``) is used.
+        drain_extract_skips: Optional zero-arg callable returning (and
+              clearing) the items the source skipped during the last
+              extract (e.g. endpoints answering with server-side errors).
+              Each dict must match the ``invalid_details`` shape consumed
+              by the quality-issues email, plus a ``resource`` key naming
+              the dlt resource it belongs to.
     """
 
     name: str
     dlt_source_factory: Callable[[], DltSource]
     resources: dict[str, ResourceSpec]
     publisher: str | None = None
+    drain_extract_skips: Callable[[], list[dict]] | None = None
 
 
 def run_source(
