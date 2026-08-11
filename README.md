@@ -125,13 +125,15 @@ SOURCES__DATASPOT__DATASPOT_ACCESS_KEY=
 SOURCES__DATASPOT__EXPOSED_CLIENT_ID=
 ```
 
-**Dataspot enrichment** (deployment-specific, no fallback — all required):
+**Dataspot enrichment** (deployment-specific; required unless noted optional):
 
 ```bash
 # Role UUID of the "data owner" attribution in Dataspot (tenant-specific)
 DATA_OWNER_ROLE_UUID=02222f05-5690-4cb8-8d90-c27ca57e98e9
 # Staatskalender API — enriches organisational units with contact data
 STAATSKALENDER_BASE_URL=https://staatskalender.bs.ch/api
+# Optional — authenticates Staatskalender calls (avoids anonymous rate-limit timeouts)
+HTTPS_ACCESS_KEY_STAATSKALENDER=
 # Fixed contacts for responsiblePerson / responsibleDeputy on every code-list concept, dataset and dataservice
 RESPONSIBLE_PERSON_EMAIL=email@example.com
 RESPONSIBLE_DEPUTY_EMAIL=email@example.com

@@ -6,12 +6,16 @@ Caches and retry logic live here so they're independently testable.
 """
 
 import logging
+import os
 import time
 from collections.abc import Callable, Iterator
 from email.utils import parsedate_to_datetime
 from typing import Any
 
+import requests
 from dlt.sources.helpers.rest_client import RESTClient
+from requests import PreparedRequest
+from requests.auth import AuthBase, HTTPBasicAuth
 
 from metadataswiss_connector.sources.dataspot.constants import (
     DATA_OWNER_ROLE_UUID,
@@ -24,6 +28,25 @@ from metadataswiss_connector.sources.dataspot.constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _StaatskalenderAuth(AuthBase):
+    """Exchange an API key for a token, then Basic-auth with that token."""
+
+    def __init__(self, access_key: str, authenticate_url: str) -> None:
+        self._access_key = access_key
+        self._authenticate_url = authenticate_url
+        self._token: str | None = None
+
+    def __call__(self, request: PreparedRequest) -> PreparedRequest:
+        if not self._token:
+            response = requests.get(
+                self._authenticate_url,
+                auth=HTTPBasicAuth(self._access_key, ""),
+            )
+            response.raise_for_status()
+            self._token = response.json()["token"]
+        return HTTPBasicAuth(self._token, "")(request)
 
 
 class DataspotEnrichment:
@@ -46,9 +69,20 @@ class DataspotEnrichment:
     ):
         self.database_name = database_name
         self.client = client or RESTClient(base_url=base_url, auth=auth)
-        self.staatskalender_client = staatskalender_client or RESTClient(
-            base_url=STAATSKALENDER_BASE_URL
-        )
+        if staatskalender_client is not None:
+            self.staatskalender_client = staatskalender_client
+        else:
+            key = os.environ.get("HTTPS_ACCESS_KEY_STAATSKALENDER")
+            if key:
+                sk_auth = _StaatskalenderAuth(
+                    key, f"{STAATSKALENDER_BASE_URL}/authenticate"
+                )
+            else:
+                sk_auth = None
+            self.staatskalender_client = RESTClient(
+                base_url=STAATSKALENDER_BASE_URL,
+                auth=sk_auth,
+            )
         self._parent_cache: dict[str, dict] = {}
         self._agency_cache: dict[int, dict | None] = {}
         self._data_owner_name_cache: dict[str, str | None] = {}
