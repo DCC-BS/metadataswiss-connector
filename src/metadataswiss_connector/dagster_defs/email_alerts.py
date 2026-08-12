@@ -32,7 +32,7 @@ from metadataswiss_connector.dagster_defs.invalid_records_report import (
 )
 
 
-SMTP_SECURITY_CHOICES = ("starttls", "ssl")
+SMTP_SECURITY_CHOICES = ("starttls", "ssl", "none")
 
 # Metadata is synced to I14Y at most once per day, so the alert sensors only
 # need to react shortly after a run finishes — not on Dagster's default 30s
@@ -124,12 +124,12 @@ def _send_email(
 
     recipients = [addr.strip() for addr in cfg["to_addrs"].split(",") if addr.strip()]
     port = int(cfg["port"])
-    use_ssl = cfg["security"] == "ssl"
-    smtp_cls = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+    security = cfg["security"]
+    smtp_cls = smtplib.SMTP_SSL if security == "ssl" else smtplib.SMTP
     local_hostname = os.environ.get("SMTP_LOCAL_HOSTNAME") or None
     with smtp_cls(cfg["host"], port, local_hostname=local_hostname, timeout=30) as smtp:
         smtp.ehlo()
-        if not use_ssl:
+        if security == "starttls":
             smtp.starttls()
             smtp.ehlo()
         if cfg["user"]:

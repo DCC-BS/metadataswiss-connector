@@ -188,7 +188,7 @@ SMTP_HOST=smtp.example.ch
 SMTP_PORT=587
 SMTP_USER=alerts@example.ch
 SMTP_PASSWORD=...
-SMTP_SECURITY=starttls  # starttls (port 587) | ssl (port 465)
+SMTP_SECURITY=starttls  # starttls (port 587) | ssl (port 465) | none (port 25, no TLS)
 SMTP_FROM=alerts@example.ch
 EMAIL_TO=ops@example.ch,team@example.ch
 ```
