@@ -45,23 +45,23 @@ _TOPIC_TO_THEME = {
 # Dataspot geoCategory (eCH-166) → I14Y dataset-theme code.
 _GEOCATEGORY_TO_THEME = {
     "imageryBaseMapsEarthCover": "122",               # Basiskarten, Bodenbedeckung, Bilddaten → Geoinformationen
-    "boundaries": "122",                              # Politische und administrative Grenzen → Geoinformationen
-    "elevation": "122",                               # Höhen → Geoinformationen
     "location": "122",                                # Ortsangaben, Referenzsysteme → Geoinformationen
-    "society": "106",                                 # Bevölkerung, Gesellschaft, Kultur → Gesellschaft
-    "inlandWaters": "113",                            # Gewässer → Umwelt
-    "environment": "113",                             # Umwelt-, Naturschutz → Umwelt
-    "climatologyMeteorologyAtmosphere": "113",        # Atmosphäre, Luft, Klima → Umwelt
-    "geoscientificInformation": "113",                # Geologie, Boden, naturbedingte Risiken → Umwelt
-    "farming": "109",                                 # Landwirtschaft → Landwirtschaft
-    "biota": "121",                                   # Wald, Flora, Fauna → Tiere
-    "intelligenceMilitary": "111",                    # Militär, Sicherheit → Sicherheit
-    "utilitiesCommunication": "110",                  # Ver-, Entsorgung, Kommunikation → Infrastruktur
-    "health": "114",                                  # Gesundheit → Gesundheit
-    "economy": "115",                                 # Wirtschaftliche Aktivitäten → Wirtschaft
-    "structure": "120",                               # Gebäude, Anlagen → Gebäude und Grundstücke
+    "elevation": "122",                               # Höhen → Geoinformationen
+    "boundaries": "122",                              # Politische und administrative Grenzen → Geoinformationen
     "planningCadastre": "102",                        # Raumplanung, Grundstückskataster → Bauen
+    "geoscientificInformation": "113",                # Geologie, Boden, naturbedingte Risiken → Umwelt
+    "biota": "121",                                   # Wald, Flora, Fauna → Tiere
+    "inlandWaters": "113",                            # Gewässer → Umwelt
+    "climatologyMeteorologyAtmosphere": "113",        # Atmosphäre, Luft, Klima → Umwelt
+    "environment": "113",                             # Umwelt-, Naturschutz → Umwelt
+    "society": "106",                                 # Bevölkerung, Gesellschaft, Kultur → Gesellschaft
+    "health": "114",                                  # Gesundheit → Gesundheit
+    "structure": "120",                               # Gebäude, Anlagen → Gebäude und Grundstücke
     "transportation": "116",                          # Verkehr → Mobilität
+    "utilitiesCommunication": "110",                  # Ver-, Entsorgung, Kommunikation → Infrastruktur
+    "intelligenceMilitary": "111",                    # Militär, Sicherheit → Sicherheit
+    "farming": "109",                                 # Landwirtschaft → Landwirtschaft
+    "economy": "115",                                 # Wirtschaftliche Aktivitäten → Wirtschaft
 }
 
 
