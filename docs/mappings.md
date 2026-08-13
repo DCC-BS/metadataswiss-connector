@@ -156,32 +156,24 @@ _Source: `_GEOCATEGORY_TO_THEME`._
 
 | Dataspot code | Dataspot label | I14Y code | I14Y label |
 | --- | --- | --- | --- |
-| `imageryBaseMapsEarthCover_BaseMaps` | Basiskarten, Landschaftsmodelle | `122` | Geoinformationen |
-| `imageryBaseMapsEarthCover_EarthCover` | Bodenbedeckung, Bodennutzung | `122` | Geoinformationen |
-| `imageryBaseMapsEarthCover_Imagery` | Luft-, Satellitenbilder | `122` | Geoinformationen |
-| `boundaries` | Politische und administrative Grenzen | `122` | Geoinformationen |
-| `elevation` | Höhen | `122` | Geoinformationen |
+| `imageryBaseMapsEarthCover` | Basiskarten, Bodenbedeckung, Bilddaten | `122` | Geoinformationen |
 | `location` | Ortsangaben, Referenzsysteme | `122` | Geoinformationen |
-| `geoscientificInformation_Geology` | Geologie | `122` | Geoinformationen |
-| `society` | Bevölkerung, Gesellschaft, Kultur | `106` | Gesellschaft |
-| `inlandWaters` | Gewässer | `113` | Umwelt |
-| `environment_EnvironmentalProtection` | Umweltschutz, Lärm | `113` | Umwelt |
-| `environment_NatureProtection` | Natur- und Landschaftsschutz | `113` | Umwelt |
-| `climatologyMeteorologyAtmosphere` | Atmosphäre, Luft, Klima | `113` | Umwelt |
-| `geoscientificInformation_NaturalHazards` | Naturbedingte Risiken | `113` | Umwelt |
-| `geoscientificInformation_Soils` | Boden | `113` | Umwelt |
-| `farming` | Landwirtschaft | `109` | Landwirtschaft |
+| `elevation` | Höhen | `122` | Geoinformationen |
+| `boundaries` | Politische und administrative Grenzen | `122` | Geoinformationen |
+| `planningCadastre` | Raumplanung, Grundstückskataster | `102` | Bauen |
+| `geoscientificInformation` | Geologie, Boden, naturbedingte Risiken | `113` | Umwelt |
 | `biota` | Wald, Flora, Fauna | `121` | Tiere |
-| `intelligenceMilitary` | Militär, Sicherheit | `111` | Sicherheit |
-| `utilitiesCommunication_Utilities` | Wasser- und Abfallsysteme | `110` | Infrastruktur |
-| `utilitiesCommunication_Communication` | Kommunikation | `110` | Infrastruktur |
-| `utilitiesCommunication_Energy` | Energie | `124` | Energie |
+| `inlandWaters` | Gewässer | `113` | Umwelt |
+| `climatologyMeteorologyAtmosphere` | Atmosphäre, Luft, Klima | `113` | Umwelt |
+| `environment` | Umwelt-, Naturschutz | `113` | Umwelt |
+| `society` | Bevölkerung, Gesellschaft, Kultur | `106` | Gesellschaft |
 | `health` | Gesundheit | `114` | Gesundheit |
-| `economy` | Wirtschaftliche Aktivitäten | `115` | Wirtschaft |
 | `structure` | Gebäude, Anlagen | `120` | Gebäude und Grundstücke |
-| `planningCadastre_Cadastre` | Grundstückskataster | `120` | Gebäude und Grundstücke |
-| `planningCadastre_Planning` | Raumplanung, Raumentwicklung | `102` | Bauen |
 | `transportation` | Verkehr | `116` | Mobilität |
+| `utilitiesCommunication` | Ver-, Entsorgung, Kommunikation | `110` | Infrastruktur |
+| `intelligenceMilitary` | Militär, Sicherheit | `111` | Sicherheit |
+| `farming` | Landwirtschaft | `109` | Landwirtschaft |
+| `economy` | Wirtschaftliche Aktivitäten | `115` | Wirtschaft |
 
 ### Dataspot personal_data to I14Y confidentialityPerson
 
