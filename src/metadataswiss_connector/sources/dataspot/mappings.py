@@ -44,31 +44,23 @@ _TOPIC_TO_THEME = {
 
 # Dataspot geoCategory (eCH-166) → I14Y dataset-theme code.
 _GEOCATEGORY_TO_THEME = {
-    "imageryBaseMapsEarthCover_BaseMaps": "122",      # Basiskarten, Landschaftsmodelle → Geoinformationen
-    "imageryBaseMapsEarthCover_EarthCover": "122",    # Bodenbedeckung, Bodennutzung → Geoinformationen
-    "imageryBaseMapsEarthCover_Imagery": "122",       # Luft-, Satellitenbilder → Geoinformationen
+    "imageryBaseMapsEarthCover": "122",               # Basiskarten, Bodenbedeckung, Bilddaten → Geoinformationen
     "boundaries": "122",                              # Politische und administrative Grenzen → Geoinformationen
     "elevation": "122",                               # Höhen → Geoinformationen
     "location": "122",                                # Ortsangaben, Referenzsysteme → Geoinformationen
-    "geoscientificInformation_Geology": "122",        # Geologie → Geoinformationen
     "society": "106",                                 # Bevölkerung, Gesellschaft, Kultur → Gesellschaft
     "inlandWaters": "113",                            # Gewässer → Umwelt
-    "environment_EnvironmentalProtection": "113",     # Umweltschutz, Lärm → Umwelt
-    "environment_NatureProtection": "113",            # Natur- und Landschaftsschutz → Umwelt
+    "environment": "113",                             # Umwelt-, Naturschutz → Umwelt
     "climatologyMeteorologyAtmosphere": "113",        # Atmosphäre, Luft, Klima → Umwelt
-    "geoscientificInformation_NaturalHazards": "113", # Naturbedingte Risiken → Umwelt
-    "geoscientificInformation_Soils": "113",          # Boden → Umwelt
+    "geoscientificInformation": "113",                # Geologie, Boden, naturbedingte Risiken → Umwelt
     "farming": "109",                                 # Landwirtschaft → Landwirtschaft
     "biota": "121",                                   # Wald, Flora, Fauna → Tiere
     "intelligenceMilitary": "111",                    # Militär, Sicherheit → Sicherheit
-    "utilitiesCommunication_Utilities": "110",        # Wasser- und Abfallsysteme → Infrastruktur
-    "utilitiesCommunication_Communication": "110",    # Kommunikation → Infrastruktur
-    "utilitiesCommunication_Energy": "124",           # Energie → Energie
+    "utilitiesCommunication": "110",                  # Ver-, Entsorgung, Kommunikation → Infrastruktur
     "health": "114",                                  # Gesundheit → Gesundheit
     "economy": "115",                                 # Wirtschaftliche Aktivitäten → Wirtschaft
     "structure": "120",                               # Gebäude, Anlagen → Gebäude und Grundstücke
-    "planningCadastre_Cadastre": "120",               # Grundstückskataster → Gebäude und Grundstücke
-    "planningCadastre_Planning": "102",               # Raumplanung, Raumentwicklung → Bauen
+    "planningCadastre": "102",                        # Raumplanung, Grundstückskataster → Bauen
     "transportation": "116",                          # Verkehr → Mobilität
 }
 
