@@ -145,10 +145,12 @@ The pipeline is orchestrated via Dagster. Assets are generated per registered so
 
 ```bash
 # Start the Dagster UI (default: http://localhost:3000)
-uv run dagster dev
+uv run dg dev
 ```
 
-The `metadataswiss_connector.dagster_defs` module is loaded automatically by `dagster dev` via `[tool.dagster]` in `pyproject.toml`. A `full_sync_schedule` (daily 03:00, timezone `Europe/Zurich`, configurable via `CONNECTOR_SYNC_CRON` / `CONNECTOR_SYNC_TIMEZONE`) is registered but starts **stopped** — it must be deliberately enabled in the Dagster UI under *Automation*.
+> `dg dev` is the current Dagster dev CLI; the legacy `uv run dagster dev` still works but now prints a deprecation notice.
+
+The `metadataswiss_connector.dagster_defs` module is loaded automatically via `[tool.dagster].module_name` and `[tool.dg.project].code_location_target_module` in `pyproject.toml`, so both `dg dev` and `dagster dev` discover it. A `full_sync_schedule` (daily 03:00, timezone `Europe/Zurich`, configurable via `CONNECTOR_SYNC_CRON` / `CONNECTOR_SYNC_TIMEZONE`) is registered but starts **stopped** — it must be deliberately enabled in the Dagster UI under *Automation*.
 
 ## Deployment (Docker Compose)
 

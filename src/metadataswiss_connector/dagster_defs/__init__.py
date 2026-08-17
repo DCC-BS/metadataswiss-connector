@@ -2,8 +2,9 @@
 
 Exposes one ``Definitions`` object that materialises the connector's
 extract/transform/publish steps as assets, one set per registered
-``CatalogSource``. Pointed to by ``[tool.dagster].module_name`` in
-``pyproject.toml`` so ``dagster dev`` can discover it.
+``CatalogSource``. Pointed to by ``[tool.dagster].module_name`` and
+``[tool.dg.project].code_location_target_module`` in ``pyproject.toml``
+so both ``dg dev`` (preferred) and legacy ``dagster dev`` can discover it.
 """
 
 from __future__ import annotations
