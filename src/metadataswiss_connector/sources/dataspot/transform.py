@@ -304,8 +304,8 @@ def transform_to_concept(
     ``POST /concepts/{id}/codelist-entries/imports/Json`` once the
     concept's I14Y UUID is known.
     """
-    # Enumerations expose no customProperties — ``date_created`` is the
-    # only timestamp available in the source payload. Fall back to the
+    # Enumerations carry no timestamp custom property — ``date_created`` is
+    # the only timestamp available in the source payload. Fall back to the
     # fixed open-lower-bound sentinel rather than ``datetime.now()``: a
     # wall-clock default would change the payload hash on every run and
     # trigger a spurious re-publish for any concept missing date_created.

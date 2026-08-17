@@ -21,6 +21,26 @@ def _is_public(item: dict) -> bool:
     return item.get("publicState") == PUBLIC_STATE
 
 
+def _publish_on_i14y(item: dict) -> bool:
+    """Whether a record opts in to I14Y publication.
+
+    Gated by the ``publish_on_i14y`` custom property: only an explicit
+    ``"yes"`` (case-insensitive) opts in; a missing property or any other
+    value (``"no"`` included) keeps the record off I14Y. The flag surfaces
+    on the list item for data products *and* code lists (it is simply
+    absent until set on at least one record).
+
+    Applied to ``data_products``, ``data_services`` and ``code_lists``.
+    Their raw tables use ``write_disposition="replace"`` (not ``merge``)
+    so that a record which loses its ``"yes"`` actually drops out of the
+    raw table — a merge table would retain the stale row and keep
+    publishing it — and is then decommissioned on the next sync (``sync``
+    deletes records absent from the source).
+    """
+    value = item.get("customProperties", {}).get("publish_on_i14y")
+    return isinstance(value, str) and value.strip().lower() == "yes"
+
+
 # Skips recorded by ``_skip_responses`` during the current extract. Drained
 # (and thereby cleared) by the Dagster extract asset via
 # ``drain_extract_skips`` after ``pipeline.run`` — from there they flow into
@@ -176,16 +196,27 @@ def dataspot_source(
     # human-readable title into the alert email.
     products_spec["processing_steps"].append({"map": _remember_label})
 
+    # Code lists opt in to I14Y via the same ``publish_on_i14y`` custom
+    # property as data products (it surfaces on the enumeration list item).
+    # ``replace`` — like data_products/data_services — so a code list that
+    # loses its ``"yes"`` drops out and is decommissioned; a merge table
+    # would keep publishing the stale row. Filtering the parent also stops
+    # ``code_list_entries`` (its child) from fetching literals for lists
+    # that won't be published.
+    code_lists_spec = _public_resource(
+        "code_lists",
+        "schemes/Referenzdaten/enumerations",
+        "_embedded.enumerations",
+    )
+    code_lists_spec["processing_steps"].append({"filter": _publish_on_i14y})
+    code_lists_spec["write_disposition"] = "replace"
+
     config = {
         "client": {"base_url": api_base_url, "auth": auth},
         "resource_defaults": {"primary_key": "id", "write_disposition": "merge"},
         "resources": [
             products_spec,
-            _public_resource(
-                "code_lists",
-                "schemes/Referenzdaten/enumerations",
-                "_embedded.enumerations",
-            ),
+            code_lists_spec,
             _public_resource(
                 "code_list_entries",
                 "schemes/Referenzdaten/enumerations/{resources.code_lists.id}/literals",
@@ -233,24 +264,37 @@ def dataspot_source(
         data_from=data_products_all,
         name="data_products",
         primary_key="id",
-        write_disposition="merge",
+        # ``replace`` (not ``merge``) so the ``publish_on_i14y`` gate below
+        # actually removes records: a merge table retains rows no longer
+        # yielded, so a dataset that loses its ``"yes"`` would keep being
+        # published. Replace rebuilds the table as exactly the opted-in set
+        # each run, letting sync decommission the rest.
+        write_disposition="replace",
     )
     def data_products(items):
-        """Pass through OGD/GEO data products (published as I14Y Datasets)."""
+        """OGD/GEO data products opted in to I14Y (published as Datasets)."""
         for item in _as_list(items):
-            if item.get("stereotype") in DATASET_STEREOTYPES:
+            if (
+                item.get("stereotype") in DATASET_STEREOTYPES
+                and _publish_on_i14y(item)
+            ):
                 yield item
 
     @dlt.transformer(
         data_from=data_products_all,
         name="data_services",
         primary_key="id",
-        write_disposition="merge",
+        # ``replace`` for the same reason as ``data_products`` above: the
+        # gate must be able to drop an API that loses its ``"yes"``.
+        write_disposition="replace",
     )
     def data_services(items):
-        """Pass through API data products (published as I14Y DataServices)."""
+        """API data products opted in to I14Y (published as DataServices)."""
         for item in _as_list(items):
-            if item.get("stereotype") in DATA_SERVICE_STEREOTYPES:
+            if (
+                item.get("stereotype") in DATA_SERVICE_STEREOTYPES
+                and _publish_on_i14y(item)
+            ):
                 yield item
 
     @dlt.transformer(
