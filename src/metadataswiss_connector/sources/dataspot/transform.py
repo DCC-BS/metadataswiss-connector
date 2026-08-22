@@ -62,7 +62,12 @@ def transform_to_dataset(
         )
         if d.get("access_url")
     ]
-    contact_points = _organizational_unit_contact_points(record["id"], lookups)
+    override = _contact_points_from_kontaktstelle_override(record, lookups)
+    contact_points = (
+        override
+        if override is not None
+        else _organizational_unit_contact_points(record["id"], lookups)
+    )
     data_owner = _resolve_data_owner(record["id"], lookups)
     structure_ttl = build_dataset_shacl_turtle(
         dataset_id=record["id"],
@@ -141,6 +146,28 @@ def _resolve_data_owner(dataset_id: str, lookups: Lookups) -> str | None:
     return None
 
 
+def _vcard_from_agency(agency: dict, *, fn: str | None) -> VCardModel:
+    """Build a VCardModel from a flattened Staatskalender agency row.
+
+    Shared by the ancestor-walk and ``i14y_kontaktstelle_sk_id`` override
+    paths, which differ only in where ``fn`` comes from (collection label
+    vs. the agency's own Staatskalender name).
+    """
+    return VCardModel(
+        fn=dcat.multi_language(fn),
+        has_address=dcat.multi_language(
+            "\n".join(
+                line for line in (
+                    agency.get("location_address"),
+                    agency.get("location_code_city"),
+                ) if line
+            ) or None
+        ),
+        has_email=agency["email"],
+        has_telephone=agency.get("phone"),
+    )
+
+
 def _organizational_unit_contact_points(
     dataset_id: str, lookups: Lookups
 ) -> list[VCardModel]:
@@ -158,28 +185,34 @@ def _organizational_unit_contact_points(
     for path in _ancestor_paths(dataset_id, lookups):
         collection_id = path.get("collection_id")
         agency = agencies.get(collection_id)
-        if not agency:
-            continue
-        email = agency.get("email")
-        if not email:
+        if not agency or not agency.get("email"):
             continue
         collection = collections.get(collection_id, {})
-        return [
-            VCardModel(
-                fn=dcat.multi_language(collection.get("label")),
-                has_address=dcat.multi_language(
-                    "\n".join(
-                        line for line in (
-                            agency.get("location_address"),
-                            agency.get("location_code_city"),
-                        ) if line
-                    ) or None
-                ),
-                has_email=email,
-                has_telephone=agency.get("phone"),
-            )
-        ]
+        return [_vcard_from_agency(agency, fn=collection.get("label"))]
     return []
+
+
+def _contact_points_from_kontaktstelle_override(
+    record: dict, lookups: Lookups
+) -> list[VCardModel] | None:
+    """Contact point from the ``i14y_kontaktstelle_sk_id`` override, if set.
+
+    Returns ``None`` when the dataset has no override (caller should fall
+    back to ``_organizational_unit_contact_points``). When set, the
+    override is strict: it looks up the given Staatskalender ID in
+    ``kontaktstelle_agencies`` and returns either that agency's contact
+    point (``fn`` from the agency's own Staatskalender ``title``, not any
+    collection label) or an empty list if the agency is unknown or has no
+    email — the collection ancestry is never consulted as a fallback.
+    """
+    sk_id = record.get("custom_properties__i14y_kontaktstelle_sk_id")
+    if sk_id is None:
+        return None
+    agencies = lookups.unique_by("kontaktstelle_agencies", "state_calendar_id")
+    agency = agencies.get(int(sk_id))
+    if not agency or not agency.get("email"):
+        return []
+    return [_vcard_from_agency(agency, fn=agency.get("title"))]
 
 
 def transform_to_dataservice(

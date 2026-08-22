@@ -124,6 +124,71 @@ class TestTransformToDatasetEdgeCases:
         assert ds.data_owner == "A-Amt"
 
 
+class TestKontaktstelleOverride:
+    """``custom_properties__i14y_kontaktstelle_sk_id`` overrides the
+    ancestor-walk contact point with a specific Staatskalender agency."""
+
+    def _lookups_with_valid_ancestor(self) -> dict:
+        # An ancestor with a valid, emailed agency -> would win if the
+        # override didn't take priority (or didn't take priority strictly).
+        return {
+            "dataset_collection_path": [
+                {"dataset_id": "ds-override", "collection_id": "col-child", "depth": 0}
+            ],
+            "collections": [{"id": "col-child", "label": "Fachstelle Statistik"}],
+            "collection_agencies": [
+                {"collection_id": "col-child", "email": "statistik@bs.ch"}
+            ],
+        }
+
+    def test_override_used_when_set(self):
+        record = {
+            "id": "ds-override",
+            "label": "Override-Datensatz",
+            "description": "x",
+            "custom_properties__i14y_kontaktstelle_sk_id": 1012,
+        }
+        lookups = {
+            **self._lookups_with_valid_ancestor(),
+            "kontaktstelle_agencies": [
+                {
+                    "state_calendar_id": 1012,
+                    "title": "DCC Data Competence Center",
+                    "email": "dcc@bs.ch",
+                    "phone": "+41 61 111 11 11",
+                }
+            ],
+        }
+        ds = transform.transform_to_dataset(
+            record, {}, lookups=Lookups(lookups), publisher=PUBLISHER
+        )
+        assert len(ds.contact_points) == 1
+        cp = ds.contact_points[0]
+        assert cp.has_email == "dcc@bs.ch"
+        assert cp.fn.de == "DCC Data Competence Center"
+        assert cp.has_telephone == "+41 61 111 11 11"
+
+    def test_override_strict_no_fallback(self):
+        # The override's agency has no email; even though the ancestor
+        # path resolves to a perfectly valid agency, it must not be used.
+        record = {
+            "id": "ds-override",
+            "label": "Override-Datensatz",
+            "description": "x",
+            "custom_properties__i14y_kontaktstelle_sk_id": 1012,
+        }
+        lookups = {
+            **self._lookups_with_valid_ancestor(),
+            "kontaktstelle_agencies": [
+                {"state_calendar_id": 1012, "title": "DCC Data Competence Center", "email": ""}
+            ],
+        }
+        ds = transform.transform_to_dataset(
+            record, {}, lookups=Lookups(lookups), publisher=PUBLISHER
+        )
+        assert ds.contact_points is None
+
+
 class TestTransformToDatasetWithStructure:
     def _build(self, load_fixture):
         fx = load_fixture("dataset_with_structure.json")

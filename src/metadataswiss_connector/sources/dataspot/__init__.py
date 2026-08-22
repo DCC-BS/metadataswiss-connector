@@ -28,6 +28,7 @@ dataspot_catalog_source = CatalogSource(
                 "collection_data_owners",
                 "collection_agencies",
                 "collections",
+                "kontaktstelle_agencies",
             ),
         ),
         "data_services": ResourceSpec(

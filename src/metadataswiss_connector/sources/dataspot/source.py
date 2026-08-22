@@ -153,6 +153,26 @@ def _as_list(items):
     return [items] if isinstance(items, dict) else items
 
 
+def _agency_lookup_row(state_calendar_id: int, agency: dict) -> dict:
+    """Flatten a Staatskalender agency payload into a lookup row.
+
+    Shared by ``collection_agencies`` (ancestor-resolved agencies) and
+    ``kontaktstelle_agencies`` (``i14y_kontaktstelle_sk_id`` overrides) so
+    both lookups carry the same contact fields (``email``, ``phone``,
+    ``location_address``, ``title``, …) flattened from ``data[]``.
+    """
+    data = {
+        entry.get("name"): entry.get("value")
+        for entry in agency.get("data", []) or []
+        if entry.get("name")
+    }
+    return {
+        "state_calendar_id": state_calendar_id,
+        "agency_href": agency.get("href"),
+        **data,
+    }
+
+
 @dlt.source(name="dataspot", section="dataspot")
 def dataspot_source(
     base_url: str = dlt.config.value,
@@ -362,17 +382,41 @@ def dataspot_source(
             agency = enrichment.fetch_agency(int(state_calendar_id))
             if agency is None:
                 continue
-            data = {
-                entry.get("name"): entry.get("value")
-                for entry in agency.get("data", []) or []
-                if entry.get("name")
-            }
             yield {
                 "collection_id": collection.get("id"),
-                "state_calendar_id": int(state_calendar_id),
-                "agency_href": agency.get("href"),
-                **data,
+                **_agency_lookup_row(int(state_calendar_id), agency),
             }
+
+    @dlt.transformer(
+        data_from=data_products,
+        name="kontaktstelle_agencies",
+        primary_key="state_calendar_id",
+        write_disposition="merge",
+    )
+    def kontaktstelle_agencies(items):
+        """Staatskalender agencies referenced by ``i14y_kontaktstelle_sk_id``.
+
+        One row per distinct Staatskalender ID that datasets override their
+        Kontaktstelle with. ``fetch_agency`` memoizes per ID for the life
+        of the extract, so a handful of IDs shared across many datasets
+        cost one Staatskalender call each, no matter how many datasets
+        reference them.
+        """
+        seen: set[int] = set()
+        for item in _as_list(items):
+            sk_id = item.get("customProperties", {}).get(
+                "i14y_kontaktstelle_sk_id"
+            )
+            if sk_id is None:
+                continue
+            sk_id = int(sk_id)
+            if sk_id in seen:
+                continue
+            seen.add(sk_id)
+            agency = enrichment.fetch_agency(sk_id)
+            if agency is None:
+                continue
+            yield _agency_lookup_row(sk_id, agency)
 
     @dlt.transformer(
         data_from=data_products_all,
@@ -470,6 +514,7 @@ def dataspot_source(
         collections,
         dataset_collection_path,
         collection_agencies,
+        kontaktstelle_agencies,
         collection_data_owners,
         dataset_structure_components,
     ]

@@ -40,7 +40,7 @@ _Built by `transform_to_dataset()` -> `DcatDatasetInputModel`._
 | `themes` | `custom_properties__geo_category`, `custom_properties__topics` (child) | mappings.themes |
 | `spatial` | `spatial` | - |
 | `temporal_coverage` | `temporal_start`, `temporal_end` | temporal_coverage |
-| `contact_points` | `id` | _organizational_unit_contact_points |
+| `contact_points` | `id` | _organizational_unit_contact_points, _contact_points_from_kontaktstelle_override |
 | `languages` | `"de"` | - |
 | `retention_period_complement` | `custom_properties__retention_period`, `custom_properties__retention_justification` | mappings.retention_period_complement |
 | `landing_pages` | `custom_properties__i14y_dataset_landing_page` | landing_pages |
